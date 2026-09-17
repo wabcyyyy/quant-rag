@@ -164,6 +164,8 @@ def test_cache_write_error_counted(monkeypatch):
 
 def test_judge_cache_init_failure_blocks_uncached_full_run(monkeypatch):
     """缓存初始化失败还继续跑，就是无缓存的全量 judge（约 10 倍成本）——必须失败。"""
+    pytest.importorskip("langchain.globals", reason="eval extra（langchain）未安装")
+    pytest.importorskip("langchain_community.cache", reason="eval extra（langchain）未安装")
     _fresh_stats(monkeypatch)
     cfg = {"llm": {"cache": True}, "eval": {"ragas_metrics": ["faithfulness"]}, "embedding": {}}
     monkeypatch.setattr(runner, "cache_enabled", lambda cfg=None: True)
@@ -187,6 +189,7 @@ class _Resp:
 
 
 def test_counter_reads_raw_openai_reasoning_key():
+    pytest.importorskip("langchain_core.callbacks", reason="eval extra（langchain）未安装")
     c = _make_token_counter()
     c.on_llm_end(_Resp(usage={"prompt_tokens": 100, "completion_tokens": 500,
                               "completion_tokens_details": {"reasoning_tokens": 470}}))
@@ -196,6 +199,7 @@ def test_counter_reads_raw_openai_reasoning_key():
 
 
 def test_counter_accumulates_normalized_generations():
+    pytest.importorskip("langchain_core.callbacks", reason="eval extra（langchain）未安装")
     gen = Mock()
     gen.message.usage_metadata = {"input_tokens": 7, "output_tokens": 9,
                                   "output_token_details": {"reasoning": 4}}
