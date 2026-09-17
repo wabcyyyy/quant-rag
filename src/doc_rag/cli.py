@@ -151,12 +151,13 @@ def ingest(
         cfg,
         collection=collection,
         recreate=recreate,
-        use_llm_meta=llm_meta,  # 默认关：文件名信号已覆盖日期/大类，LLM 抽取成本高（PLAN §8）
+        use_llm_meta=llm_meta or None,  # None=读配置（默认关）；--llm-meta 显式开
         chunk_strategy=chunk_strategy,
+        limit=limit,  # 试跑上限对解析与入库同时生效，否则 --limit 也会全量计费
     )
     typer.echo(
         f"入库：{result['docs']} 篇 / {result['chunks']} 块 → Qdrant[{collection}]"
-        f"（分块策略：{chunk_strategy}）"
+        f"（分块策略：{chunk_strategy}，LLM 元数据抽取：{'开' if result.get('llm_meta') else '关'}）"
     )
     for item in result["failed"]:
         typer.echo(f"  [入库失败] {item['file']}: {item['error']}")
@@ -208,6 +209,11 @@ def query(
     if not no_rewrite:
         typer.echo(f"[改写] {plan['reason']}\n")
 
+    # 上下文上限对交互查询同样生效：否则关掉重排/聚合题时会送 12~25 块进合成，
+    # 输入 token 翻倍且答案质量未必更好
+    cap = int(cfg["retrieval"].get("max_contexts") or 0)
+    if cap:
+        results = results[:cap]
     contexts = [
         {
             "no": i + 1,
@@ -278,6 +284,10 @@ def evaluate(
 
     cfg = load_config()
 
+    if fresh_judge and not (ragas or ragas_from is not None):
+        typer.echo("--fresh-judge 只在启用 RAGAS（--ragas 或 --ragas-from）时有效")
+        raise typer.Exit(1)
+
     if ragas_from is not None:
         from doc_rag.eval.runner import ragas_from_results
 
@@ -312,6 +322,7 @@ def evaluate(
         use_rerank=rerank,
         require_citation=not no_citation_constraint,
         ragas_sample=ragas_sample,
+        use_judge_cache=not fresh_judge,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")
@@ -333,6 +344,12 @@ def evaluate(
         f"LLM 缓存        : 命中 {st['hit']} / 未命中 {st['miss']}"
         f"（命中率 {st['hit_rate']}，库内共 {st['cached_total']} 条）"
     )
+    if st.get("completion_tokens"):
+        reas = st.get("reasoning_tokens") or 0
+        typer.echo(
+            f"本次真实调用    : 输入 {st['prompt_tokens']:,} / 输出 {st['completion_tokens']:,}"
+            f" tokens（其中思考 {reas:,}，占输出 {reas / st['completion_tokens']:.0%}）"
+        )
 
     out_dir = Path(cfg["paths"]["eval"])
     out_dir.mkdir(parents=True, exist_ok=True)

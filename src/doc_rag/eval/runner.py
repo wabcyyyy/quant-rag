@@ -114,6 +114,7 @@ def _retrieve_contexts(
     use_rewrite = "+rewrite" in flags
     use_rerank = "+rerank" in flags
     aggregate = aggregate or "+aggregate" in flags
+    # 检索模式已在 ragas_from_results 构建 retriever 前还原（dense/hybrid 构建时定死）
     rewriter = QueryRewriter(cfg["retrieval"]) if use_rewrite else None
     plan = (
         rewriter.rewrite(question)
@@ -127,7 +128,9 @@ def _retrieve_contexts(
         aggregate=plan["aggregate"] or aggregate,
     )
     results = _maybe_rerank(cfg, plan["rewritten"], results, use_rerank)
-    return _contexts(results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None)
+    return _contexts(
+        results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
+    )
 
 
 def evaluate(
@@ -144,6 +147,7 @@ def evaluate(
     use_rerank: bool = False,
     require_citation: bool = True,
     ragas_sample: int | None = None,
+    use_judge_cache: bool = True,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -288,7 +292,8 @@ def evaluate(
     ragas_summary = None
     if with_ragas:
         ragas_summary = _run_ragas(
-            _ragas_rows(items, per_item), cfg, sample_n=ragas_sample
+            _ragas_rows(items, per_item), cfg, sample_n=ragas_sample,
+            use_cache=use_judge_cache,
         )
 
     results = {
@@ -358,32 +363,65 @@ def _make_token_counter():
             self.calls = 0
             self.prompt_tokens = 0
             self.completion_tokens = 0
+            self.reasoning_tokens = 0
 
         def on_llm_end(self, response, **kwargs) -> None:
             self.calls += 1
             llm_output = getattr(response, "llm_output", None) or {}
             usage = llm_output.get("token_usage") or llm_output.get("usage") or {}
-            if not usage:
+            if usage:
+                # 原始 OpenAI 用量键是 reasoning_tokens；langchain 归一化后是 reasoning
+                details = usage.get("completion_tokens_details") or {}
+                reasoning = int(details.get("reasoning_tokens") or 0)
+            else:
+                reasoning = 0
                 for gen_list in getattr(response, "generations", None) or []:
                     for gen in gen_list:
                         meta = getattr(getattr(gen, "message", None), "usage_metadata", None)
-                        if meta:
-                            usage = meta
+                        if not meta:
+                            continue
+                        usage = meta  # 多代时取最后一份，但 reasoning 要累加
+                        reasoning += int(
+                            (meta.get("output_token_details") or {}).get("reasoning") or 0
+                        )
             self.prompt_tokens += int(
                 usage.get("prompt_tokens") or usage.get("input_tokens") or 0
             )
             self.completion_tokens += int(
                 usage.get("completion_tokens") or usage.get("output_tokens") or 0
             )
+            self.reasoning_tokens += reasoning
 
         def as_dict(self) -> dict:
             return {
                 "calls": self.calls,
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
+                # 推理型模型把输出预算大部分花在看不见的 reasoning 上（实测 judge 占 97%），
+                # 单列出来才能看出「关掉思考」省的是哪一块
+                "reasoning_tokens": self.reasoning_tokens,
             }
 
     return _TokenCounter()
+
+
+def _judge_chat_kwargs(cfg: dict) -> dict:
+    """judge 的统一构造参数（`_run_ragas` 与 `probe-judge` 必须同源，否则探针看到的行为
+    和正式判分不一致——这正是当初定位口径 bug 时踩过的坑）。"""
+    llm_cfg = cfg["llm"]
+    kwargs: dict = {
+        "model": llm_cfg["model"],
+        "base_url": llm_cfg["base_url"],
+        "api_key": llm_cfg["api_key"],
+        "temperature": 0,
+    }
+    # judge 的两个子任务（拆陈述 / 逐条判定）几乎不需要思考，但推理型模型会把
+    # 输出预算的 97% 花在看不见的 reasoning token 上（实测单次 1554 → 79，全量 10.4×）。
+    # 同一个模型、只关思考，不改 judge 身份，不破坏 §5.3 的 judge 固定口径。
+    effort = (cfg.get("eval", {}).get("judge") or {}).get("reasoning_effort")
+    if effort:
+        kwargs["reasoning_effort"] = effort
+    return kwargs
 
 
 def _run_ragas(
@@ -391,11 +429,13 @@ def _run_ragas(
     cfg: dict,
     sample_n: int | None = None,
     use_cache: bool = True,
+    total: int | None = None,
 ) -> dict | None:
     """RAGAS 第二轨：rows=[{id,type,user_input,response,retrieved_contexts}] → judge 指标。
 
     可信度口径（PLAN §5.3）：judge 固定模型、temperature=0；只看与客观指标的相对一致性。
     `use_cache=False` 用于测 judge 自身的运行间随机性（temperature=0 也不保证跨请求逐字复现）。
+    `total`：调用方已自行抽样时传入抽样前的总数，保证报告口径（n_answerable_total / sampled）准确。
     """
     try:
         from langchain.globals import set_llm_cache
@@ -410,7 +450,7 @@ def _run_ragas(
 
     if sample_n is None:
         sample_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
-    all_n = len(rows)
+    all_n = total if total is not None else len(rows)
     rows = _sample_rows(rows, sample_n)
 
     # judge 是最大调用方（每指标每条多次内部调用），必须走缓存：
@@ -421,9 +461,15 @@ def _run_ragas(
             from ..generate.llm import _CACHE_PATH as _llm_cache_path
 
             judge_cache_path = str(_llm_cache_path.parent / "judge_cache.sqlite")
+            Path(judge_cache_path).parent.mkdir(parents=True, exist_ok=True)
             set_llm_cache(SQLiteCache(database_path=judge_cache_path))
-        except Exception:  # noqa: BLE001 缓存设置失败不影响评估
-            judge_cache_path = None
+        except Exception as exc:  # noqa: BLE001
+            set_llm_cache(None)
+            # 静默降级 = 无缓存跑完全量 judge（实付约 10 倍）。宁可失败也不白花。
+            raise RuntimeError(
+                f"judge 缓存初始化失败（{exc}）——已阻止无缓存的全量判分。"
+                f"可用 --fresh-judge 显式跳过缓存，或修复 .cache 目录权限后重试。"
+            ) from exc
     else:
         set_llm_cache(None)  # 显式关缓存：set_llm_cache 是进程级全局，必须清掉
 
@@ -435,14 +481,7 @@ def _run_ragas(
         return {"skipped": f"未配置有效指标：{wanted}"}
 
     llm_cfg = cfg["llm"]
-    judge = LangchainLLMWrapper(
-        ChatOpenAI(
-            model=llm_cfg["model"],
-            base_url=llm_cfg["base_url"],
-            api_key=llm_cfg["api_key"],
-            temperature=0,
-        )
-    )
+    judge = LangchainLLMWrapper(ChatOpenAI(**_judge_chat_kwargs(cfg), max_retries=0))
     # AnswerRelevancy 需要嵌入模型：用 SiliconFlow 的 BGE-M3（DeepSeek 无 embedding API）
     emb_cfg = cfg["embedding"]
     embeddings = LangchainEmbeddingsWrapper(
@@ -454,6 +493,14 @@ def _run_ragas(
     )
     counter = _make_token_counter()
     try:
+        from ragas.run_config import RunConfig
+
+        # RAGAS 默认 max_retries=10，叠上 judge 自身重试会把限流放大成几十次请求；
+        # SDK 层已在 ChatOpenAI(max_retries=0) 关掉，这里给个收紧的应用层上限
+        run_config = RunConfig(max_retries=2, max_wait=30, timeout=180, max_workers=8)
+    except Exception:  # noqa: BLE001 旧版 ragas 无 RunConfig 时不设限，但不阻塞评估
+        run_config = None
+    try:
         ds = EvaluationDataset.from_list(
             [{k: v for k, v in r.items() if k not in ("id", "type")} for r in rows]
         )
@@ -464,6 +511,7 @@ def _run_ragas(
             embeddings=embeddings,
             callbacks=[counter],
             show_progress=False,
+            **({"run_config": run_config} if run_config is not None else {}),
         )
         df = out.to_pandas()
         summary = {
@@ -512,6 +560,8 @@ def probe_judge(results_file: Path, item_id: str, cfg: dict | None = None) -> di
     """
     import asyncio
 
+    from langchain.globals import set_llm_cache
+    from langchain_community.cache import SQLiteCache
     from langchain_openai import ChatOpenAI
     from ragas.llms import LangchainLLMWrapper
     from ragas.metrics import Faithfulness
@@ -522,14 +572,22 @@ def probe_judge(results_file: Path, item_id: str, cfg: dict | None = None) -> di
     if item is None:
         return {"error": f"{results_file.name} 里没有 {item_id}"}
 
+    # 复用 judge 缓存：探针常被连着调好几条，重付一遍 judge 调用纯属浪费
+    if cache_enabled(cfg.get("llm")):
+        try:
+            from ..generate.llm import _CACHE_PATH as _llm_cache_path
+
+            cache_path = _llm_cache_path.parent / "judge_cache.sqlite"
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            set_llm_cache(SQLiteCache(database_path=str(cache_path)))
+        except Exception:  # noqa: BLE001 探针失败可见即可，不中断
+            set_llm_cache(None)
+
     metric = Faithfulness()
+    # 必须与正式判分同源（含 reasoning_effort / max_retries），否则探针看到的行为
+    # 与 `_run_ragas` 不一致——探针的价值就在于反映真实判分时 judge 在做什么
     metric.llm = LangchainLLMWrapper(
-        ChatOpenAI(
-            model=cfg["llm"]["model"],
-            base_url=cfg["llm"]["base_url"],
-            api_key=cfg["llm"]["api_key"],
-            temperature=0,
-        )
+        ChatOpenAI(**_judge_chat_kwargs(cfg), max_retries=0)
     )
     row = {
         "user_input": item["question"],
@@ -569,20 +627,42 @@ def ragas_from_results(
     use_cache: bool = True,
     out_file: Path | None = None,
 ) -> dict | None:
-    """对已保存的评估结果补跑 RAGAS：答案复用，上下文缺失/口径过期时免费重检索。
+    """对已保存的评估结果补跑 RAGAS：答案复用，上下文过期时按需重检索还原。
 
-    结果落盘（`<results>_ragas.json`）：此前只打印到控制台，导致 PLAN 里的
-    Faithfulness 数字无法追溯到逐条分数，也就无法回答「差异是题型抽样还是 judge 噪声」。
+    三个成本/正确性要点：
+    - **先抽样、后重检索**。检索要调 embedding、重排要调远端 API，都不是免费的；
+      旧实现会给全部可答题重检索，哪怕只要判 15 条。
+    - 旧结果文件的 `meta.retrieval` 里记着 dense/hybrid，重放必须还原，否则是在
+      用另一套检索的上下文判分。
+    - 重放后正文对不上 → 这条的答案本来就不是对着这份上下文生成的，判了也是假数据。
+      **拒判并报错**，而不是拿替换后的上下文悄悄送进付费 judge。
     """
     cfg = cfg or load_config()
     data = json.loads(results_file.read_text(encoding="utf-8"))
     meta = data.get("meta") or {}
-    retriever, _ = _build_retriever(cfg, meta.get("collection"))
+    candidates = [i for i in data["items"] if i["type"] != "no_answer" and i.get("answer")]
+
+    resolved_n = sample_n
+    if resolved_n is None:
+        resolved_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
+    picked = _sample_rows(candidates, resolved_n)
+
+    needs_rebuild = [i for i in picked if _legacy_contexts(i.get("contexts"))]
+    replay_cfg = cfg
+    if needs_rebuild:
+        # dense/hybrid 在 retriever 构建时就被定死，必须在构建**前**注入保存的模式，
+        # 否则是拿当前配置（默认 hybrid）的上下文去判 dense 跑出来的答案
+        mode_match = re.search(r"\[([a-z0-9_]+)\]", meta.get("retrieval") or "")
+        replay_cfg = dict(cfg)
+        replay_cfg["retrieval"] = dict(cfg.get("retrieval") or {})
+        if mode_match:
+            replay_cfg["retrieval"]["mode"] = mode_match.group(1)
+    retriever = _build_retriever(replay_cfg, meta.get("collection"))[0] if needs_rebuild else None
+
     rows = []
-    rebuilt = mismatched = 0
-    for raw in data["items"]:
-        if raw["type"] == "no_answer" or not raw.get("answer"):
-            continue
+    rebuilt = 0
+    mismatched: list[str] = []
+    for raw in picked:
         contexts = raw.get("contexts")
         if _legacy_contexts(contexts):
             ctx = _retrieve_contexts(raw["question"], meta, retriever, cfg)
@@ -590,7 +670,8 @@ def ragas_from_results(
             stored = [_norm(c) for c in (contexts or [])]
             got = [_norm(c["text"]) for c in ctx]
             if stored and stored != got:
-                mismatched += 1
+                mismatched.append(raw["id"])
+                continue
             contexts = _judge_contexts(ctx)
             rebuilt += 1
         rows.append(
@@ -602,11 +683,19 @@ def ragas_from_results(
                 "retrieved_contexts": contexts,
             }
         )
-    summary = _run_ragas(rows, cfg, sample_n=sample_n, use_cache=use_cache)
+    if mismatched:
+        raise ValueError(
+            f"{results_file.name} 有 {len(mismatched)} 条上下文无法按原样复现"
+            f"（{', '.join(mismatched[:8])}…）——rerank 非位级可复现所致。"
+            f"拿重放后的上下文去判这些答案会得到假数据，已拒绝判分。"
+            f"请重新执行 `doc-rag eval` 生成与答案同源的上下文后再补跑 RAGAS。"
+        )
+    summary = _run_ragas(
+        rows, cfg, sample_n=resolved_n, use_cache=use_cache, total=len(candidates)
+    )
     if summary is None:
         return None
     summary["contexts_rebuilt"] = rebuilt
-    summary["contexts_mismatched"] = mismatched
     payload = {
         "meta": {
             "timestamp": datetime.now().isoformat(timespec="seconds"),

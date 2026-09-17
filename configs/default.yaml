@@ -53,7 +53,10 @@ rerank:
   top_n: 6 # 重排后送进合成的块数（削减上下文噪声 → Faithfulness）
 
 metadata_extraction:
-  enabled: true
+  # LLM 元数据抽取的总开关（index_parsed 缺省时读这里）。
+  # 保持 false：这是 1 次/文档 = 1130 次调用的最大成本单点（PLAN §8），
+  # 文件名信号已覆盖日期/大类。要用必须显式 `ingest --llm-meta` 或改这里。
+  enabled: false
   fields: [date, meeting_type, attendees, topics, decisions]
 
 eval:
@@ -62,3 +65,6 @@ eval:
   ragas_metrics: [faithfulness] # answer_relevancy 中文场景噪声大（实测 0.40 但答案明显切题），默认关
   judge:
     temperature: 0.0
+    # 关掉 judge 的思考：拆陈述/逐条判定不需要推理，但推理型模型会把输出预算的
+    # 97% 花在看不见的 reasoning token 上（实测单次 1554 → 79）。同模型、不改 judge 身份。
+    reasoning_effort: none

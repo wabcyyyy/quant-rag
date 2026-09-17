@@ -58,15 +58,25 @@ def index_parsed(
     cfg: dict,
     collection: str | None = None,
     recreate: bool = False,
-    use_llm_meta: bool = True,
+    use_llm_meta: bool | None = None,
     chunk_strategy: str = "structural",
+    limit: int | None = None,
 ) -> dict:
+    """中间 JSON → Qdrant。
+
+    `use_llm_meta` 缺省时读 `metadata_extraction.enabled`（默认 false）。
+    **绝不能默认开**：LLM 抽取是 1 次/文档，1130 篇就是 1130 次调用，
+    是本项目最大的单点成本（PLAN §8）。要用必须显式传 True 或走 `ingest --llm-meta`。
+    `limit` 只取前 N 篇（试跑）——解析和入库都必须受它约束，否则试跑也会全量计费。
+    """
     client = QdrantClient(url=cfg["qdrant"]["url"], timeout=60.0)
     name = collection or cfg["qdrant"]["collection"]
     ensure_collection(client, name, int(cfg["embedding"]["dense_dim"]), recreate)
     embedder = Embedder(cfg["embedding"])
+    if use_llm_meta is None:
+        use_llm_meta = bool((cfg.get("metadata_extraction") or {}).get("enabled"))
     llm_cfg = cfg["llm"] if use_llm_meta else {}
-    stats: dict = {"docs": 0, "chunks": 0, "failed": []}
+    stats: dict = {"docs": 0, "chunks": 0, "failed": [], "llm_meta": use_llm_meta}
 
     # 先装载全部中间 JSON
     docs: list[tuple[Path, IntermediateDoc]] = []
@@ -81,6 +91,8 @@ def index_parsed(
                 docs.append((json_file, doc))
         except Exception as exc:  # noqa: BLE001
             stats["failed"].append({"file": json_file.name, "error": str(exc)})
+    if limit:
+        docs = docs[:limit]
 
     # LLM 元数据是批量入库的瓶颈：并行抽取（文件名信号在 base_meta 里零成本）
     if llm_cfg:
