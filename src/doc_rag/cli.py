@@ -213,6 +213,7 @@ def evaluate(
     ragas_from: Annotated[Path | None, typer.Option(help="对已有评估结果补跑 RAGAS（答案复用，省钱）")] = None,
     retrieval_only: Annotated[bool, typer.Option(help="只评检索指标（不调 LLM 合成）")] = False,
     mode: Annotated[str | None, typer.Option(help="检索模式：hybrid（默认）/ dense（消融对照）")] = None,
+    aggregate: Annotated[bool, typer.Option(help="聚合检索：大池取块后按文档去重（跨文档题）")] = False,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -243,6 +244,7 @@ def evaluate(
         with_ragas=ragas,
         with_answers=not retrieval_only,
         mode=mode,
+        aggregate=aggregate,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")
@@ -252,6 +254,8 @@ def evaluate(
     typer.echo(f"包含匹配准确率   : {s['contains_acc']}")
     typer.echo(f"拒答正确率      : {s['refusal_acc']}")
     typer.echo(f"引用有效率      : {s['citation_valid_rate']}")
+    typer.echo(f"文档覆盖率      : {s['mean_doc_coverage']}")
+    typer.echo(f"  分题型覆盖率  : {s['coverage_by_type']}")
     if results.get("ragas"):
         typer.echo(f"RAGAS           : {results['ragas']}")
 

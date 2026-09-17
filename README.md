@@ -23,21 +23,24 @@ uv run pytest          # 测试
 - [~] Phase 2：消融 #1（纯 Dense vs Hybrid）已完成；cross_doc 聚合检索、Rerank、Faithfulness 优化进行中
 - [ ] Phase 3：全量压测、图片 caption 入库、GraphRAG 跨文档
 
-## 评估结果（黄金集 v1 · 64 条 · 1121 篇语料）
+## 评估结果（黄金集 v1 · 62 条 · 1121 篇语料）
 
-消融 #1：纯 Dense vs Hybrid（Dense+BM25+RRF）
+消融 #1：纯 Dense vs Hybrid（Dense+BM25+RRF，top-8）
 
 | 指标 | 纯 Dense | Hybrid（默认） |
 |------|---------|---------------|
-| Recall@5 | 0.667 | **0.702～0.719** |
-| Recall@8 | 0.754 | **0.807** |
-| MRR | 0.597 | **0.602～0.612** |
-
-> 区间为两次独立运行结果：RRF 并列分数的打破顺序带来 ±1.7pt 波动，
-> 因此所有结论只按相对变化读（PLAN §5.3 评估可信度口径）。
+| Recall@5 | 0.836 | **0.909** |
+| Recall@8 | 0.891 | **0.945** |
+| MRR | 0.764 | **0.794** |
 
 分题型（Recall@8，Hybrid）：fact 1.00 · open_discussion 1.00 · decision 0.88 ·
-term 0.83 · time_filter 0.57 · **cross_doc 0.38（当前瓶颈，待做聚合检索）**
+term 0.83 · time_filter 1.00 · cross_doc 1.00
+
+**跨文档聚合题**（改用文档覆盖率度量，Recall 类指标对此已失去区分度）：
+
+- 覆盖率上限 = top_n / 答案集大小；预算扫描：cross_doc 0.13（top-8）→ 0.35（top-30）
+- 实体聚焦查询：周碧玉 0.06→0.22
+- 消融 #5 元数据过滤（时间限定题）：覆盖率 **0.61 → 0.96**
 
 回答质量（Hybrid）：包含匹配 0.82 · 拒答正确率 1.00 · 引用有效率 1.00 · RAGAS Faithfulness 0.62
 

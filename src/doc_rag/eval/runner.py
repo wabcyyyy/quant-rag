@@ -64,6 +64,7 @@ def evaluate(
     with_ragas: bool = False,
     with_answers: bool = True,
     mode: str | None = None,
+    aggregate: bool = False,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -75,10 +76,16 @@ def evaluate(
 
     per_item: list[dict] = []
     for item in items:
-        results = retriever.retrieve(item.question, top_n=top_n)
+        results = retriever.retrieve(item.question, top_n=top_n, aggregate=aggregate)
         got_ids = [r["doc_id"] for r in results]
         hit_ranks = [got_ids.index(s) + 1 for s in item.source_doc_ids if s in got_ids]
         first_rank = min(hit_ranks) if hit_ranks else None
+        # 文档覆盖率：聚合题（答案集 5~30 篇）真正该量的指标
+        coverage = (
+            len(set(got_ids) & set(item.source_doc_ids)) / len(item.source_doc_ids)
+            if item.source_doc_ids
+            else None
+        )
 
         ctx = _contexts(results)
         answer = synthesizer.answer(item.question, ctx) if with_answers else ""
@@ -103,6 +110,8 @@ def evaluate(
                 "type": item.type,
                 "question": item.question,
                 "first_hit_rank": first_rank,
+                "doc_coverage": round(coverage, 4) if coverage is not None else None,
+                "n_source_docs": len(item.source_doc_ids),
                 "answered_ok": answered_ok,
                 "citation_valid": citation_valid,
                 "n_citations": len(refs),
@@ -125,11 +134,14 @@ def evaluate(
     refusables = [r for r in per_item if _is_refusable(items, r["id"])]
     cites = [r for r in per_item if r["citation_valid"] is not None]
 
+    covs = [r["doc_coverage"] for r in per_item if r["doc_coverage"] is not None]
+
     summary = {
         "n_items": len(per_item),
         "recall_at_5": len(hits5) / len(with_source),
         f"recall_at_{top_n}": len(hitsN) / len(with_source),
         "mrr": sum(mrr_scores) / len(with_source),
+        "mean_doc_coverage": round(sum(covs) / len(covs), 4) if covs else None,
         "contains_acc": _safe_div(
             sum(1 for r in scorable if r["answered_ok"]), len(scorable)
         ),
@@ -139,6 +151,14 @@ def evaluate(
         "citation_valid_rate": _safe_div(
             sum(1 for r in cites if r["citation_valid"]), len(cites)
         ),
+        "coverage_by_type": {
+            t: round(
+                sum(r["doc_coverage"] for r in per_item if r["type"] == t and r["doc_coverage"] is not None)
+                / max(sum(1 for r in per_item if r["type"] == t and r["doc_coverage"] is not None), 1),
+                4,
+            )
+            for t in sorted({r["type"] for r in per_item})
+        },
     }
 
     ragas_summary = None
@@ -159,7 +179,8 @@ def evaluate(
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "top_n": top_n,
             "collection": retriever.collection,
-            "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]",
+            "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
+            + ("+aggregate" if aggregate else ""),
             "with_answers": with_answers,
         },
         "summary": summary,

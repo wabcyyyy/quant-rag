@@ -36,16 +36,20 @@ class HybridRetriever:
         top_n: int | None = None,
         filters: dict | None = None,
         mode: str | None = None,
+        aggregate: bool = False,
     ) -> list[dict]:
         """检索。mode="dense" 走纯向量（消融对照组），默认 "hybrid" 走双路 RRF。
 
+        aggregate=True：聚合检索——先取大池（pool_size），按 doc_id 去重后返回
+        每篇文档的最佳块。跨文档聚合题（「关于 X 有哪些记录」）需要文档多样性，
+        单纯 top-k 可能被同一篇文档的多个块占满。
+
         filters 为简单匹配条件：{"topics": "预算"} / {"attendees": ["张三"]} /
         {"doc_date": {"gte": "2026-01-01"}}（消融 #5 的开关）。
-        返回按排名的 [{chunk_id, doc_id, title, text, section_path, page,
-        block_type, doc_date, score}]。
         """
         limit = top_n or int(self.cfg.get("fusion_limit", 12))
         mode = mode or self.cfg.get("mode", "hybrid")
+        pool = int(self.cfg.get("aggregate_pool", 50)) if aggregate else limit
         qvec = self.embedder.embed([question])[0]
         qfilter = self._build_filter(filters)
 
@@ -54,7 +58,7 @@ class HybridRetriever:
                 self.collection,
                 query=qvec,
                 using="dense",
-                limit=limit,
+                limit=pool,
                 query_filter=qfilter,
                 with_payload=True,
             )
@@ -64,13 +68,13 @@ class HybridRetriever:
                 models.Prefetch(
                     query=qvec,
                     using="dense",
-                    limit=int(self.cfg.get("k_dense", 20)),
+                    limit=max(pool, int(self.cfg.get("k_dense", 20))),
                     filter=qfilter,
                 ),
                 models.Prefetch(
                     query=models.Document(text=qtext, model=_BM25_MODEL),
                     using="bm25",
-                    limit=int(self.cfg.get("k_bm25", 20)),
+                    limit=max(pool, int(self.cfg.get("k_bm25", 20))),
                     filter=qfilter,
                 ),
             ]
@@ -78,16 +82,22 @@ class HybridRetriever:
                 self.collection,
                 prefetch=prefetch,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
-                limit=limit,
+                limit=pool,
                 with_payload=True,
             )
         results = []
+        seen_docs: set[str] = set()
         for point in response.points:
             payload = point.payload or {}
+            doc_id = payload.get("doc_id")
+            if aggregate:
+                if doc_id in seen_docs:  # 每篇文档只留最佳块 → 覆盖更多文档
+                    continue
+                seen_docs.add(doc_id)
             results.append(
                 {
                     "chunk_id": payload.get("chunk_id"),
-                    "doc_id": payload.get("doc_id"),
+                    "doc_id": doc_id,
                     "title": payload.get("title"),
                     "text": payload.get("text"),
                     "section_path": payload.get("section_path") or [],
@@ -97,6 +107,8 @@ class HybridRetriever:
                     "score": point.score,
                 }
             )
+            if len(results) >= limit:
+                break
         return results
 
     @staticmethod

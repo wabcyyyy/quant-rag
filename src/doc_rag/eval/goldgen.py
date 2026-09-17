@@ -90,23 +90,34 @@ def _person_names(docs: list[dict]) -> dict[str, set[str]]:
     return {n: ids for n, ids in names.items() if n in verified}
 
 
+def _docs_containing(docs: list[dict], needle: str) -> list[str]:
+    """所有文本含该词的 doc_id（空白归一化）——聚合题的正确答案集合。"""
+    n = _norm(needle)
+    return sorted(d["doc_id"] for d in docs if n in _norm(d["text"]))
+
+
 def _cross_doc_items(docs: list[dict], llm_cfg: dict) -> list[GoldItem]:
-    """跨 2~9 篇复现的人名 → 聚合题（人名有区分度，泛词与模板词已排除）。"""
+    """跨文档聚合题：人名有效（@ 验证）+ 全库 5~60 篇含名（有区分度且答案集完整）。
+
+    v1 教训：来源集合若只取 @ 提及的文档会严重漏计（黄日航 @ 提及 8 篇，
+    实际 205 篇含名），导致把正确检索判为未命中。聚合题的来源 = 全部含名文档。
+    """
     names = _person_names(docs)
-    candidates = sorted(
-        (n for n, ids in names.items() if 2 <= len(ids) <= 9),
-        key=lambda n: (-len(names[n]), n),
-    )
+    scored: list[tuple[str, list[str]]] = []
+    for name in names:
+        src = _docs_containing(docs, name)
+        if 5 <= len(src) <= 60:
+            scored.append((name, src))
+    scored.sort(key=lambda kv: -len(kv[1]))
     items = []
-    for name in candidates[:8]:
-        ids = sorted(names[name])
+    for name, src in scored[:8]:
         items.append(
             GoldItem(
                 id="", type="cross_doc",
                 question=f"关于「{name}」，公司文档里出现过哪些讨论或安排？",
-                expected_answer=f"散见于 {len(ids)} 篇文档，围绕「{name}」有多次记录（聚合题，按检索命中评分）",
+                expected_answer=f"散见于 {len(src)} 篇文档，围绕「{name}」有多次记录（聚合题，按检索命中评分）",
                 must_contain=[name],
-                source_doc_ids=ids,
+                source_doc_ids=src,
                 refusable=False, source_title="(跨文档)",
             )
         )
@@ -198,7 +209,7 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
 
 
 def _time_items(docs: list[dict]) -> list[GoldItem]:
-    """年份 × 该年内跨 2~5 篇出现的人名 → 时间限定题。"""
+    """时间限定题：年份 × 该年内 2~15 篇含名的人名（答案集完整、范围聚焦）。"""
     by_year: dict[str, list[dict]] = {}
     for d in docs:
         m = re.search(r"20\d{2}", d["title"])
@@ -210,19 +221,20 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
         if len(pool) < 3:
             continue
         names = _person_names(pool)
-        candidates = sorted(
-            (n for n, ids in names.items() if 2 <= len(ids) <= 5),
-            key=lambda n: (-len(names[n]), n),
-        )
-        for name in candidates[:4]:
-            ids = sorted(names[name])
+        scored: list[tuple[str, list[str]]] = []
+        for name in names:
+            src = _docs_containing(pool, name)
+            if 2 <= len(src) <= 15:
+                scored.append((name, src))
+        scored.sort(key=lambda kv: -len(kv[1]))
+        for name, src in scored[:4]:
             items.append(
                 GoldItem(
                     id="", type="time_filter",
                     question=f"{year}年的文档中，关于「{name}」有哪些记录？",
                     expected_answer=f"{year}年语料中「{name}」相关内容（时间限定题，按检索命中评分）",
                     must_contain=[name],
-                    source_doc_ids=ids,
+                    source_doc_ids=src,
                     refusable=False, source_title=f"({year})",
                 )
             )
