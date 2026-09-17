@@ -701,7 +701,8 @@ fact/term 居中。
 ```text
 RAG/
 ├── PLAN.md
-├── README.md                 # 架构图 + 快速开始 + 评估结果表
+├── README.md                 # 架构图 + 快速开始 + 评估结果表（纯工程文档，不含面试叙事）
+├── docs/                     # gitignored：本地个人材料（interview-prep.md 面试准备），不入库不上传
 ├── pyproject.toml            # uv 管理
 ├── configs/default.yaml
 ├── data/{raw,parsed,eval}/
@@ -719,14 +720,18 @@ RAG/
 
 ### 面试可展示清单
 
-- [ ] `README` 架构图 + 30 秒电梯演讲  
-- [ ] 多源接入对比示例（飞书 blocks / docx / PDF 的解析结果）  
-- [ ] 检索消融表（Hybrid / Chunk / Rerank）  
-- [ ] RAGAS 基线 vs 优化后  
-- [ ] 一次带引用的真实问答（点得到页码）  
-- [ ] 已知不足与下一步（GraphRAG、VLM 图表、增量更新）
-- [ ] 2–3 个失败案例分析（解析坏例 → 定位 → 修复 → 指标变化）
-- [ ] 细粒度 commit 历史（应对「AI 代做」质疑的第一证据）
+> **归属（2026-09-18 定）**：面试叙事（电梯演讲 / 失败案例故事 / 简历素材 / 问答表）在本地
+> `docs/interview-prep.md`——`docs/` 已 gitignore，**不入库不上传**；README 只放工程文档
+> （架构 / 快速开始 / 评估数字 / 使用示例 / 已知不足），不再承担面试叙事。
+
+- [x] 架构图 + 30 秒电梯演讲（架构图在 README；演讲稿在 docs/interview-prep.md，数字已回填实测值）
+- [x] 多源接入对比示例（README「多源接入」节，示意结构；真实解析产物在本地 `data/parsed/`）
+- [x] 检索消融表（Hybrid / Chunk / Rerank，README「评估结果」节含 #1–#5）
+- [x] RAGAS 基线 vs 优化后（0.6375 → 0.9563，含口径 bug 复盘）
+- [x] 一次带引用的真实问答（README 使用示例为示意数据；实机 `doc-rag query --timing` 现场演示）
+- [x] 已知不足与下一步（README「已知不足」节）
+- [x] 2–3 个失败案例分析（docs/interview-prep.md §4：碎化 PDF / 忠实度口径 bug / 延迟糊涂账）
+- [x] 细粒度 commit 历史（按决策粒度提交）
 
 ### CLI 验收命令
 
