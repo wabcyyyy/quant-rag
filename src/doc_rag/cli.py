@@ -261,6 +261,7 @@ def evaluate(
     aggregate: Annotated[bool, typer.Option(help="聚合检索：大池取块后按文档去重（跨文档题）")] = False,
     rewrite: Annotated[bool, typer.Option(help="启用查询改写（测实际产品路径）")] = False,
     rerank: Annotated[bool, typer.Option(help="启用重排（削减上下文噪声）")] = False,
+    no_citation_constraint: Annotated[bool, typer.Option(help="消融 #4 对照组：不要求标注引用编号")] = False,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -294,6 +295,7 @@ def evaluate(
         aggregate=aggregate,
         use_rewrite=rewrite,
         use_rerank=rerank,
+        require_citation=not no_citation_constraint,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")

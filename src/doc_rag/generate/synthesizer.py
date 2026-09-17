@@ -9,12 +9,18 @@ class Synthesizer:
     def __init__(self, llm_cfg: dict) -> None:
         self.llm_cfg = llm_cfg
 
-    def answer(self, question: str, chunks: list[dict]) -> str:
-        """chunks: [{"no", "text", "doc", "page"}] → 带编号引用的回答文本。"""
+    def answer(
+        self, question: str, chunks: list[dict], require_citation: bool = True
+    ) -> str:
+        """chunks: [{"no", "text", "doc", "page"}] → 带编号引用的回答文本。
+
+        require_citation=False 用于消融 #4（无引用约束对照组）。
+        """
+        system = prompts.SYSTEM_ANSWER if require_citation else prompts.SYSTEM_ANSWER_NO_CITE
         return llm.chat(
             self.llm_cfg,
             prompts.USER_ANSWER.format(
                 context=prompts.format_context(chunks), question=question
             ),
-            system_prompt=prompts.SYSTEM_ANSWER,
+            system_prompt=system,
         )

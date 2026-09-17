@@ -18,6 +18,7 @@ from pathlib import Path
 from qdrant_client import QdrantClient
 
 from ..config import load_config
+from ..generate.llm import cache_enabled
 from ..generate.synthesizer import Synthesizer
 from ..ingest.embedder import Embedder
 from ..retrieve.hybrid import HybridRetriever
@@ -94,6 +95,7 @@ def evaluate(
     aggregate: bool = False,
     use_rewrite: bool = False,
     use_rerank: bool = False,
+    require_citation: bool = True,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -131,7 +133,11 @@ def evaluate(
         ctx = _contexts(
             results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
         )
-        answer = synthesizer.answer(item.question, ctx) if with_answers else ""
+        answer = (
+            synthesizer.answer(item.question, ctx, require_citation=require_citation)
+            if with_answers
+            else ""
+        )
 
         if not with_answers:
             answered_ok = None  # 检索模式不评回答
@@ -281,6 +287,8 @@ def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
     可信度口径（PLAN §5.3）：judge 固定模型、temperature=0；只看与客观指标的相对一致性。
     """
     try:
+        from langchain.globals import set_llm_cache
+        from langchain_community.cache import SQLiteCache
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
         from ragas import EvaluationDataset, evaluate as ragas_evaluate
         from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -288,6 +296,16 @@ def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
         from ragas.metrics import AnswerRelevancy, Faithfulness
     except Exception as exc:  # noqa: BLE001
         return {"error": f"ragas 不可用：{exc}"}
+
+    # judge 是最大调用方（每指标每条多次内部调用），必须走缓存：
+    # langchain 有自己的缓存层，不复用 llm.chat 的缓存（PLAN §8 成本控制）
+    if cache_enabled(cfg.get("llm")):
+        try:
+            from ..generate.llm import _CACHE_PATH as _llm_cache_path
+
+            set_llm_cache(SQLiteCache(database_path=str(_llm_cache_path.parent / "judge_cache.sqlite")))
+        except Exception:  # noqa: BLE001 缓存设置失败不影响评估
+            pass
 
     # 指标可选（PLAN §8 成本控制）：AnswerRelevancy 在中文场景噪声大且需嵌入调用
     wanted = [m.lower() for m in (cfg.get("eval", {}).get("ragas_metrics") or ["faithfulness"])]
