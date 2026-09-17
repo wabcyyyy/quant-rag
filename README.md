@@ -20,10 +20,11 @@ uv run pytest          # 测试
 - [x] 骨架：配置 / 统一中间表示 / 接入（PDF + doc(x)，含碎化行重建与带框表格重建）/ 结构分块 / 画像 CLI
 - [x] Phase 0：语料画像（1130 份）、表格解析抽查、黄金集 v1（64 条，人名实体构造）
 - [x] Phase 1：入库 1121 篇 / 3856 块、Hybrid 检索（Dense+BM25+RRF）、引用问答、双轨评估闭环
-- [~] Phase 2：消融 #1（纯 Dense vs Hybrid）已完成；cross_doc 聚合检索、Rerank、Faithfulness 优化进行中
+- [~] Phase 2：消融 #1–#5 全部完成（Dense vs Hybrid / 分块 / Rerank / 引用约束 / 元数据过滤）；
+  FastAPI 与演示页进行中
 - [ ] Phase 3：全量压测、图片 caption 入库、GraphRAG 跨文档
 
-## 评估结果（黄金集 v1 · 62 条 · 1121 篇语料）
+## 评估结果（黄金集 v1 · 63 条 · 1121 篇语料）
 
 消融 #1：纯 Dense vs Hybrid（Dense+BM25+RRF，top-8）
 
@@ -49,7 +50,16 @@ term 0.83 · time_filter 1.00 · cross_doc 1.00
 | 包含匹配准确率 | 0.82～0.84（两次运行区间） |
 | 拒答正确率 | **1.00** |
 | 引用有效率 / 存在率 | **1.00 / 1.00** |
-| RAGAS Faithfulness | 0.62 → 0.77（提升来自 prompt 收紧；重排对忠实度无贡献） |
+| RAGAS Faithfulness | **0.95**（全量 55 条 · 修正口径 · 两轮 0.9563/0.9423） |
+
+> **Faithfulness 的 0.77 是度量 bug，已修正**：judge 拿到的上下文缺了 `（文档名 第p页）` 前缀，
+> 而合成 prompt 要求标注来源文档名 → 答案里「《某文档》中…」被判为不忠实
+> （提及文档名的 18 条均值 0.475，不提的 37 条 0.716）。把 LLM 实际看到的上下文原样交给 judge 后，
+> 同一批答案从 0.6375 升到 **0.9563**，消融 #2 的 18pt 假差距随之归零（修正后 0.5pt，
+> 小于 1.4pt 的 judge 噪声地板）。复盘见 PLAN §5.3。
+> 配套：RAGAS 抽样改为**均匀覆盖**（原先取前 N 条，整段漏掉排在末尾的 cross_doc/time_filter）；
+> 逐条分数落盘；`doc-rag compare-ragas` 出配对差 + 95%CI + 符号检验 + 噪声地板；
+> `doc-rag probe-judge` 打印单条的 judge 中间产物（口径 bug 就是靠它定位的）。
 
 模型选型对比（同条件换模型，检索指标完全一致）：
 

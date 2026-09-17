@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from pathlib import Path
 from qdrant_client import QdrantClient
 
 from ..config import load_config
+from ..generate import prompts
 from ..generate.llm import cache_enabled
 from ..generate.synthesizer import Synthesizer
 from ..ingest.embedder import Embedder
@@ -83,6 +85,51 @@ def _contexts(results: list[dict], max_n: int | None = None) -> list[dict]:
     ]
 
 
+def _judge_contexts(ctx: list[dict]) -> list[str]:
+    """judge 必须看到与 LLM 完全相同的上下文串（含 `[n]（文档名 第p页）` 前缀）。
+
+    实测 bug：此前只把正文传给 RAGAS，而合成 prompt 要求答案标注来源文档名 ——
+    答案里「《某文档》中…」这类归属陈述在 judge 眼里无据可依，一律判为不忠实。
+    量化：提及文档名的 18 条均值 0.475，不提的 37 条 0.716，24pt 的差距全部来自
+    度量口径而非答案质量；零分条目 7 条里 5 条提及文档名。
+    同时，上下文带 `[n]` 编号后，答案里的引用标记也变成可验证的陈述。
+    """
+    return [prompts.format_context([c]) for c in ctx]
+
+
+def _retrieve_contexts(
+    question: str,
+    meta: dict,
+    retriever: HybridRetriever,
+    cfg: dict,
+    aggregate: bool = False,
+) -> list[dict]:
+    """按 meta 记录的重检索参数重放检索，还原 LLM 实际看到的编号上下文。
+
+    旧结果文件只存了正文；要补文档名必须重放**同一套**参数（改写 / 聚合 / 重排 /
+    上下文上限），否则 judge 拿到的是另一批块——等于用 A 的上下文去判 B 的答案。
+    meta.retrieval 形如 `dense+bm25+rrf[hybrid]+rewrite+rerank`。
+    """
+    flags = meta.get("retrieval") or ""
+    use_rewrite = "+rewrite" in flags
+    use_rerank = "+rerank" in flags
+    aggregate = aggregate or "+aggregate" in flags
+    rewriter = QueryRewriter(cfg["retrieval"]) if use_rewrite else None
+    plan = (
+        rewriter.rewrite(question)
+        if rewriter
+        else {"rewritten": question, "filters": None, "aggregate": aggregate}
+    )
+    results = retriever.retrieve(
+        plan["rewritten"],
+        top_n=meta.get("top_n") or 8,
+        filters=plan["filters"],
+        aggregate=plan["aggregate"] or aggregate,
+    )
+    results = _maybe_rerank(cfg, plan["rewritten"], results, use_rerank)
+    return _contexts(results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None)
+
+
 def evaluate(
     gold_file: Path,
     cfg: dict | None = None,
@@ -96,6 +143,7 @@ def evaluate(
     use_rewrite: bool = False,
     use_rerank: bool = False,
     require_citation: bool = True,
+    ragas_sample: int | None = None,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -178,7 +226,7 @@ def evaluate(
                 "citation_present": citation_present,
                 "n_citations": len(refs),
                 "answer": answer,
-                "contexts": [c["text"] for c in ctx],
+                "contexts": _judge_contexts(ctx),
             }
         )
 
@@ -239,21 +287,9 @@ def evaluate(
 
     ragas_summary = None
     if with_ragas:
-        rows = [
-            {
-                "user_input": item.question,
-                "response": r["answer"],
-                "retrieved_contexts": r.get("contexts") or [],
-            }
-            for item, r in zip(items, per_item)
-            if not item.refusable and r["answer"]
-        ]
-        # 成本杠杆：RAGAS 是调用大户（每指标每条 ≈1 次 judge 调用），
-        # 抽样即可校准趋势（PLAN §5.3：只报相对变化）。0 或未设 = 全量。
-        sample_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
-        if sample_n and sample_n < len(rows):
-            rows = rows[:sample_n]
-        ragas_summary = _run_ragas(rows, cfg)
+        ragas_summary = _run_ragas(
+            _ragas_rows(items, per_item), cfg, sample_n=ragas_sample
+        )
 
     results = {
         "meta": {
@@ -281,10 +317,85 @@ def _safe_div(a: float, b: float) -> float | None:
     return round(a / b, 4) if b else None
 
 
-def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
-    """RAGAS 第二轨：rows=[{user_input, response, retrieved_contexts}] → judge 指标。
+def _ragas_rows(items: list[GoldItem], per_item: list[dict]) -> list[dict]:
+    """构造 RAGAS 输入行：只评可答题（拒答题的拒答措辞天然不在原文中，会被忠实度惩罚）。"""
+    return [
+        {
+            "id": item.id,
+            "type": item.type,
+            "user_input": item.question,
+            "response": r["answer"],
+            "retrieved_contexts": r.get("contexts") or [],
+        }
+        for item, r in zip(items, per_item)
+        if not item.refusable and r["answer"]
+    ]
+
+
+def _sample_rows(rows: list[dict], sample_n: int) -> list[dict]:
+    """均匀抽样：黄金集按题型分块排序，取前 N 条会整段漏掉排在末尾的题型。
+
+    实测教训：63 条黄金集里 cross_doc(8) / time_filter(5) 排在最末，
+    旧的 rows[:15] 抽样 15 条完全不含这两类聚合题 —— 而分块策略的差异
+    恰恰最可能体现在聚合题上（上下文来自大池子，跨块拼接更多）。
+    """
+    if not sample_n or sample_n >= len(rows):
+        return rows
+    step = len(rows) / sample_n
+    return [rows[int(i * step)] for i in range(sample_n)]
+
+
+def _make_token_counter():
+    """构造 judge 调用量计数器（PLAN §8 成本可见）。
+
+    必须继承 langchain 的 BaseCallbackHandler：回调管理器会读 `ignore_chain` /
+    `raise_error` 等属性，鸭子类型会直接抛 AttributeError。
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class _TokenCounter(BaseCallbackHandler):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+
+        def on_llm_end(self, response, **kwargs) -> None:
+            self.calls += 1
+            llm_output = getattr(response, "llm_output", None) or {}
+            usage = llm_output.get("token_usage") or llm_output.get("usage") or {}
+            if not usage:
+                for gen_list in getattr(response, "generations", None) or []:
+                    for gen in gen_list:
+                        meta = getattr(getattr(gen, "message", None), "usage_metadata", None)
+                        if meta:
+                            usage = meta
+            self.prompt_tokens += int(
+                usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+            )
+            self.completion_tokens += int(
+                usage.get("completion_tokens") or usage.get("output_tokens") or 0
+            )
+
+        def as_dict(self) -> dict:
+            return {
+                "calls": self.calls,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+            }
+
+    return _TokenCounter()
+
+
+def _run_ragas(
+    rows: list[dict],
+    cfg: dict,
+    sample_n: int | None = None,
+    use_cache: bool = True,
+) -> dict | None:
+    """RAGAS 第二轨：rows=[{id,type,user_input,response,retrieved_contexts}] → judge 指标。
 
     可信度口径（PLAN §5.3）：judge 固定模型、temperature=0；只看与客观指标的相对一致性。
+    `use_cache=False` 用于测 judge 自身的运行间随机性（temperature=0 也不保证跨请求逐字复现）。
     """
     try:
         from langchain.globals import set_llm_cache
@@ -297,15 +408,24 @@ def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         return {"error": f"ragas 不可用：{exc}"}
 
+    if sample_n is None:
+        sample_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
+    all_n = len(rows)
+    rows = _sample_rows(rows, sample_n)
+
     # judge 是最大调用方（每指标每条多次内部调用），必须走缓存：
     # langchain 有自己的缓存层，不复用 llm.chat 的缓存（PLAN §8 成本控制）
-    if cache_enabled(cfg.get("llm")):
+    judge_cache_path = None
+    if use_cache and cache_enabled(cfg.get("llm")):
         try:
             from ..generate.llm import _CACHE_PATH as _llm_cache_path
 
-            set_llm_cache(SQLiteCache(database_path=str(_llm_cache_path.parent / "judge_cache.sqlite")))
+            judge_cache_path = str(_llm_cache_path.parent / "judge_cache.sqlite")
+            set_llm_cache(SQLiteCache(database_path=judge_cache_path))
         except Exception:  # noqa: BLE001 缓存设置失败不影响评估
-            pass
+            judge_cache_path = None
+    else:
+        set_llm_cache(None)  # 显式关缓存：set_llm_cache 是进程级全局，必须清掉
 
     # 指标可选（PLAN §8 成本控制）：AnswerRelevancy 在中文场景噪声大且需嵌入调用
     wanted = [m.lower() for m in (cfg.get("eval", {}).get("ragas_metrics") or ["faithfulness"])]
@@ -332,42 +452,173 @@ def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
             api_key=emb_cfg["api_key"],
         )
     )
+    counter = _make_token_counter()
     try:
-        ds = EvaluationDataset.from_list(rows)
+        ds = EvaluationDataset.from_list(
+            [{k: v for k, v in r.items() if k not in ("id", "type")} for r in rows]
+        )
         out = ragas_evaluate(
             dataset=ds,
             metrics=metrics,
             llm=judge,
             embeddings=embeddings,
+            callbacks=[counter],
+            show_progress=False,
         )
         df = out.to_pandas()
-        summary = {"n": len(rows), "metrics": [m.name for m in metrics]}
+        summary = {
+            "n": len(rows),
+            "n_answerable_total": all_n,
+            "sampled": sample_n if 0 < sample_n < all_n else None,
+            "judge_cache": judge_cache_path,
+            "metrics": [m.name for m in metrics],
+            "token_usage": counter.as_dict(),
+        }
+        per_item = []
+        for idx, row in enumerate(rows):
+            entry = {"id": row["id"], "type": row["type"]}
+            for m in metrics:
+                if m.name in df.columns and idx < len(df):
+                    val = df[m.name].iloc[idx]
+                    entry[m.name] = (
+                        None if val is None or math.isnan(float(val)) else round(float(val), 4)
+                    )
+            per_item.append(entry)
         for m in metrics:
             if m.name in df.columns:
                 summary[m.name] = round(float(df[m.name].mean()), 4)
+        summary["per_item"] = per_item
+        # 分题型均值：抽样偏置最容易在题型维度暴露（聚合题上下文最长、最易失分）
+        by_type: dict[str, list[float]] = {}
+        for entry in per_item:
+            for m in metrics:
+                v = entry.get(m.name)
+                if v is not None:
+                    by_type.setdefault(f"{m.name}:{entry['type']}", []).append(v)
+        summary["by_type"] = {
+            k: round(sum(v) / len(v), 4) for k, v in sorted(by_type.items())
+        }
         return summary
     except Exception as exc:  # noqa: BLE001
         return {"error": f"ragas 运行失败：{exc}"}
 
 
-def ragas_from_results(results_file: Path, cfg: dict | None = None) -> dict | None:
-    """对已保存的评估结果补跑 RAGAS：答案复用，上下文缺失时免费重检索。"""
+def probe_judge(results_file: Path, item_id: str, cfg: dict | None = None) -> dict:
+    """打印单条答案的 judge 中间产物（抽出的陈述 + 逐条判定 + 理由）。
+
+    绝对分值可疑时的定位手段：能区分「答案真不忠实」与「judge 抽错/判错」。
+    消融 #2 的口径 bug 就是这样定位到的——q007 逐字引用上下文原文却被判 0.00，
+    理由暴露了「上下文没有提到《某文档》这一文档标题」。
+    """
+    import asyncio
+
+    from langchain_openai import ChatOpenAI
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.metrics import Faithfulness
+
     cfg = cfg or load_config()
     data = json.loads(results_file.read_text(encoding="utf-8"))
-    retriever, _ = _build_retriever(cfg, data["meta"].get("collection"))
+    item = next((i for i in data["items"] if i["id"] == item_id), None)
+    if item is None:
+        return {"error": f"{results_file.name} 里没有 {item_id}"}
+
+    metric = Faithfulness()
+    metric.llm = LangchainLLMWrapper(
+        ChatOpenAI(
+            model=cfg["llm"]["model"],
+            base_url=cfg["llm"]["base_url"],
+            api_key=cfg["llm"]["api_key"],
+            temperature=0,
+        )
+    )
+    row = {
+        "user_input": item["question"],
+        "response": item["answer"],
+        "retrieved_contexts": item.get("contexts") or [],
+    }
+
+    async def _run() -> dict:
+        stmts = await metric._create_statements(row, [])
+        verdicts = await metric._create_verdicts(row, stmts.statements, [])
+        return {
+            "statements": [
+                {"statement": v.statement, "verdict": bool(v.verdict), "reason": v.reason}
+                for v in verdicts.statements
+            ],
+            "score": metric._compute_score(verdicts),
+        }
+
+    out = asyncio.run(_run())
+    return {"id": item_id, "type": item["type"], "question": item["question"], **out}
+
+
+def _legacy_contexts(contexts: list[str] | None) -> bool:
+    """旧结果文件只存了正文（无 `[n]（文档名 第p页）` 前缀），不是 LLM 实际看到的上下文。
+
+    用它跑 judge 会系统性低估忠实度（见 `_judge_contexts`），必须重检索还原。
+    """
+    if not contexts:
+        return True
+    return not contexts[0].startswith("[1]")
+
+
+def ragas_from_results(
+    results_file: Path,
+    cfg: dict | None = None,
+    sample_n: int | None = None,
+    use_cache: bool = True,
+    out_file: Path | None = None,
+) -> dict | None:
+    """对已保存的评估结果补跑 RAGAS：答案复用，上下文缺失/口径过期时免费重检索。
+
+    结果落盘（`<results>_ragas.json`）：此前只打印到控制台，导致 PLAN 里的
+    Faithfulness 数字无法追溯到逐条分数，也就无法回答「差异是题型抽样还是 judge 噪声」。
+    """
+    cfg = cfg or load_config()
+    data = json.loads(results_file.read_text(encoding="utf-8"))
+    meta = data.get("meta") or {}
+    retriever, _ = _build_retriever(cfg, meta.get("collection"))
     rows = []
-    for item in data["items"]:
-        if item["type"] == "no_answer" or not item.get("answer"):
+    rebuilt = mismatched = 0
+    for raw in data["items"]:
+        if raw["type"] == "no_answer" or not raw.get("answer"):
             continue
-        contexts = item.get("contexts")
-        if not contexts:
-            results = retriever.retrieve(item["question"], top_n=6)
-            contexts = [r["text"] for r in results]
+        contexts = raw.get("contexts")
+        if _legacy_contexts(contexts):
+            ctx = _retrieve_contexts(raw["question"], meta, retriever, cfg)
+            # 自检：重放检索必须逐字复现旧文件里的正文，否则等于换了上下文再判分
+            stored = [_norm(c) for c in (contexts or [])]
+            got = [_norm(c["text"]) for c in ctx]
+            if stored and stored != got:
+                mismatched += 1
+            contexts = _judge_contexts(ctx)
+            rebuilt += 1
         rows.append(
             {
-                "user_input": item["question"],
-                "response": item["answer"],
+                "id": raw["id"],
+                "type": raw["type"],
+                "user_input": raw["question"],
+                "response": raw["answer"],
                 "retrieved_contexts": contexts,
             }
         )
-    return _run_ragas(rows, cfg)
+    summary = _run_ragas(rows, cfg, sample_n=sample_n, use_cache=use_cache)
+    if summary is None:
+        return None
+    summary["contexts_rebuilt"] = rebuilt
+    summary["contexts_mismatched"] = mismatched
+    payload = {
+        "meta": {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "source_results": results_file.name,
+            "collection": meta.get("collection"),
+            "retrieval": meta.get("retrieval"),
+            "judge_model": cfg["llm"]["model"],
+            "judge_temperature": 0,
+            "judge_cache": use_cache,
+        },
+        "summary": summary,
+    }
+    dest = out_file or results_file.with_name(f"{results_file.stem}_ragas.json")
+    dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary

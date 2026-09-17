@@ -262,6 +262,15 @@ def evaluate(
     rewrite: Annotated[bool, typer.Option(help="启用查询改写（测实际产品路径）")] = False,
     rerank: Annotated[bool, typer.Option(help="启用重排（削减上下文噪声）")] = False,
     no_citation_constraint: Annotated[bool, typer.Option(help="消融 #4 对照组：不要求标注引用编号")] = False,
+    ragas_sample: Annotated[
+        int | None, typer.Option(help="RAGAS 抽样条数（0=全量）；默认取配置 eval.ragas_sample")
+    ] = None,
+    fresh_judge: Annotated[
+        bool, typer.Option(help="不复用 judge 缓存：测 judge 运行间随机性（会真实计费）")
+    ] = False,
+    ragas_out: Annotated[
+        Path | None, typer.Option(help="RAGAS 结果落盘路径（默认 <结果文件名>_ragas.json）")
+    ] = None,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -272,7 +281,13 @@ def evaluate(
     if ragas_from is not None:
         from doc_rag.eval.runner import ragas_from_results
 
-        out = ragas_from_results(ragas_from, cfg)
+        out = ragas_from_results(
+            ragas_from,
+            cfg,
+            sample_n=ragas_sample,
+            use_cache=not fresh_judge,
+            out_file=ragas_out,
+        )
         typer.echo(f"RAGAS（基于 {ragas_from.name} 的答案）: {out}")
         raise typer.Exit(0)
 
@@ -296,6 +311,7 @@ def evaluate(
         use_rewrite=rewrite,
         use_rerank=rerank,
         require_citation=not no_citation_constraint,
+        ragas_sample=ragas_sample,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")
@@ -323,6 +339,61 @@ def evaluate(
     out_file = out_dir / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     out_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     typer.echo(f"明细已写入 {out_file}")
+
+
+@app.command("probe-judge")
+def probe_judge_cmd(
+    results_file: Annotated[Path, typer.Argument(help="评估结果 JSON（含 answer / contexts）")],
+    item_id: Annotated[str, typer.Argument(help="条目 id，如 q007")],
+) -> None:
+    """打印单条答案的 judge 中间产物：抽出的陈述 + 逐条判定 + 理由。
+
+    绝对分值可疑时用它区分「答案真不忠实」和「judge 抽错/判错」——
+    消融 #2 的度量口径 bug 就是这样定位到的。
+    """
+    from doc_rag.eval.runner import probe_judge
+
+    out = probe_judge(results_file, item_id)
+    if out.get("error"):
+        typer.echo(out["error"])
+        raise typer.Exit(1)
+    typer.echo(f"{out['id']} | {out['type']}")
+    typer.echo(f"问题：{out['question']}\n")
+    for v in out["statements"]:
+        typer.echo(f"  {'✓' if v['verdict'] else '✗'} {v['statement']}")
+        if v.get("reason"):
+            typer.echo(f"      理由：{v['reason']}")
+    typer.echo(f"\n→ Faithfulness = {out['score']}")
+
+
+@app.command("compare-ragas")
+def compare_ragas(
+    group: Annotated[
+        list[str],
+        typer.Option(
+            "--group",
+            help="分组，格式 标签=文件1,文件2（同组多文件=同条件重跑）；第一个分组为基线",
+        ),
+    ],
+) -> None:
+    """配对判读多组 RAGAS 结果：全量配对差 + 噪声地板 + 子集敏感性。"""
+    from doc_rag.eval.compare import compare, format_report
+
+    groups = []
+    for spec in group:
+        label, _, files = spec.partition("=")
+        groups.append(
+            {"label": label, "files": [Path(f.strip()) for f in files.split(",") if f.strip()]}
+        )
+    if len(groups) < 2:
+        typer.echo("至少需要两个 --group（第一个作基线）")
+        raise typer.Exit(1)
+    for g in groups:
+        for f in g["files"]:
+            if not f.exists():
+                typer.echo(f"结果文件不存在：{f}")
+                raise typer.Exit(1)
+    typer.echo(format_report(compare(groups)))
 
 
 @app.command()

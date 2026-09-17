@@ -58,7 +58,7 @@ metadata_extraction:
 
 eval:
   gold_file: data/eval/gold.json
-  ragas_sample: 15 # RAGAS 只评前 N 条（0=全量）；judge 调用量大，抽样校准趋势即可
+  ragas_sample: 15 # RAGAS 抽样条数（0=全量）；均匀覆盖全表，不能取前 N 条——黄金集按题型分块排序，取前 N 会整段漏掉末尾题型
   ragas_metrics: [faithfulness] # answer_relevancy 中文场景噪声大（实测 0.40 但答案明显切题），默认关
   judge:
     temperature: 0.0
