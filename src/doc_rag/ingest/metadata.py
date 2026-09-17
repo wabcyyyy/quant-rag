@@ -13,7 +13,13 @@ from .schema import IntermediateDoc
 
 _FILENAME_DATE_RE = re.compile(r"(20\d{2})[年\-/.]?(\d{1,2})[月\-/.]?(\d{1,2})")
 _ISO_DATE_RE = re.compile(r"^(20\d{2})-(\d{1,2})-(\d{1,2})$")
+# 正文日期（会议纪要开头通常写明）：2020-03-14 / 2020年3月14日 / 2020.03.14
+_TEXT_DATE_RES = (
+    re.compile(r"(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})"),
+    re.compile(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"),
+)
 _PROMPT_TEXT_CHARS = 3000
+_TEXT_SCAN_CHARS = 600  # 正文头部扫描范围（日期一般在开头）
 
 
 def date_from_filename(name: str) -> str | None:
@@ -39,6 +45,22 @@ def normalize_date(value) -> str | None:
     return f"{y}-{mo:02d}-{d:02d}"
 
 
+def date_from_text(text: str, scan_chars: int = _TEXT_SCAN_CHARS) -> str | None:
+    """从正文抽取日期（会议纪要开头一般写明）。
+
+    实测动机：仅从文件名解析时全库只有 14.2% 的块带 doc_date，
+    年份过滤会误伤 86% 语料（见 PLAN §5.3 记录）。
+    """
+    for chunk in (text[:scan_chars], text):  # 先扫头部，再全篇兜底
+        for rx in _TEXT_DATE_RES:
+            m = rx.search(chunk)
+            if m:
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                if 1 <= mo <= 12 and 1 <= d <= 31:
+                    return f"{y}-{mo:02d}-{d:02d}"
+    return None
+
+
 def parse_llm_json(text: str) -> dict | None:
     """容忍 ```json 围栏与前后杂文本；解析失败返回 None。"""
     if not text:
@@ -59,7 +81,8 @@ def base_meta(doc: IntermediateDoc) -> dict:
     title = doc.meta.title or doc.meta.doc_id
     parts = title.split("_")
     return {
-        "doc_date": date_from_filename(title),
+        # 文件名优先，正文兜底（实测：仅文件名时覆盖率仅 14.2%）
+        "doc_date": date_from_filename(title) or date_from_text(doc.to_text()),
         # 文件名规范（实测语料）：大类_分组-描述_日期 → 零成本结构化信号
         "category": parts[0] if len(parts) > 1 else None,
         "doc_group": parts[1] if len(parts) > 2 else None,

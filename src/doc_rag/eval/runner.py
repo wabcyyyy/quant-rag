@@ -21,6 +21,7 @@ from ..config import load_config
 from ..generate.synthesizer import Synthesizer
 from ..ingest.embedder import Embedder
 from ..retrieve.hybrid import HybridRetriever
+from ..retrieve.rewrite import QueryRewriter
 from .schema import GoldItem
 
 _REFUSAL_MARKERS = [
@@ -65,18 +66,30 @@ def evaluate(
     with_answers: bool = True,
     mode: str | None = None,
     aggregate: bool = False,
+    use_rewrite: bool = False,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
         cfg["retrieval"]["mode"] = mode  # 消融开关：dense / hybrid
     retriever, synthesizer = _build_retriever(cfg, collection)
+    rewriter = QueryRewriter(cfg["retrieval"]) if use_rewrite else None
     payload = json.loads(gold_file.read_text(encoding="utf-8"))
     items_raw = payload["items"][:limit] if limit else payload["items"]
     items = [GoldItem.model_validate(i) for i in items_raw]
 
     per_item: list[dict] = []
     for item in items:
-        results = retriever.retrieve(item.question, top_n=top_n, aggregate=aggregate)
+        plan = (
+            rewriter.rewrite(item.question)
+            if rewriter
+            else {"rewritten": item.question, "filters": None, "aggregate": aggregate, "top_n": None}
+        )
+        results = retriever.retrieve(
+            plan["rewritten"],
+            top_n=top_n,
+            filters=plan["filters"],
+            aggregate=plan["aggregate"] or aggregate,
+        )
         got_ids = [r["doc_id"] for r in results]
         hit_ranks = [got_ids.index(s) + 1 for s in item.source_doc_ids if s in got_ids]
         first_rank = min(hit_ranks) if hit_ranks else None
@@ -180,7 +193,8 @@ def evaluate(
             "top_n": top_n,
             "collection": retriever.collection,
             "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
-            + ("+aggregate" if aggregate else ""),
+            + ("+aggregate" if aggregate else "")
+            + ("+rewrite" if use_rewrite else ""),
             "with_answers": with_answers,
         },
         "summary": summary,

@@ -142,13 +142,15 @@ def query(
     question: str,
     kb: Annotated[str | None, typer.Option(help="Qdrant collection 名")] = None,
     top_n: Annotated[int | None, typer.Option(help="融合后取块数")] = None,
+    no_rewrite: Annotated[bool, typer.Option(help="关闭查询改写（A/B 对照）")] = False,
 ) -> None:
-    """检索问答：Dense+BM25+RRF → 强制引用合成。"""
+    """检索问答：改写 → Dense+BM25+RRF → 强制引用合成。"""
     from qdrant_client import QdrantClient
 
     from doc_rag.generate.synthesizer import Synthesizer
     from doc_rag.ingest.embedder import Embedder
     from doc_rag.retrieve.hybrid import HybridRetriever
+    from doc_rag.retrieve.rewrite import QueryRewriter
 
     cfg = load_config()
     collection = kb or cfg["qdrant"]["collection"]
@@ -158,10 +160,20 @@ def query(
         collection=collection,
         retrieval_cfg=cfg["retrieval"],
     )
-    results = retriever.retrieve(question, top_n=top_n)
+    plan = {"rewritten": question, "filters": None, "aggregate": False, "top_n": None, "reason": "已关闭改写"}
+    if not no_rewrite:
+        plan = QueryRewriter(cfg["retrieval"]).rewrite(question)
+    results = retriever.retrieve(
+        plan["rewritten"],
+        top_n=top_n or plan["top_n"],
+        filters=plan["filters"],
+        aggregate=plan["aggregate"],
+    )
     if not results:
         typer.echo("（未检索到相关内容——先跑 doc-rag ingest）")
         raise typer.Exit(1)
+    if not no_rewrite:
+        typer.echo(f"[改写] {plan['reason']}\n")
 
     contexts = [
         {
@@ -214,6 +226,7 @@ def evaluate(
     retrieval_only: Annotated[bool, typer.Option(help="只评检索指标（不调 LLM 合成）")] = False,
     mode: Annotated[str | None, typer.Option(help="检索模式：hybrid（默认）/ dense（消融对照）")] = None,
     aggregate: Annotated[bool, typer.Option(help="聚合检索：大池取块后按文档去重（跨文档题）")] = False,
+    rewrite: Annotated[bool, typer.Option(help="启用查询改写（测实际产品路径）")] = False,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -245,6 +258,7 @@ def evaluate(
         with_answers=not retrieval_only,
         mode=mode,
         aggregate=aggregate,
+        use_rewrite=rewrite,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")
@@ -264,6 +278,62 @@ def evaluate(
     out_file = out_dir / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     out_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     typer.echo(f"明细已写入 {out_file}")
+
+
+@app.command()
+def backfill(
+    kb: Annotated[str | None, typer.Option(help="Qdrant collection 名")] = None,
+) -> None:
+    """按当前规则重算 payload 元数据（如 doc_date）并原地更新——不重新向量化。
+
+    动机：元数据规则演进（如 doc_date 增补正文抽取）后无需重灌全库。
+    """
+    import json
+
+    from qdrant_client import QdrantClient, models
+
+    from doc_rag.ingest.metadata import base_meta
+    from doc_rag.ingest.schema import IntermediateDoc
+
+    cfg = load_config()
+    collection = kb or cfg["qdrant"]["collection"]
+    parsed = Path(cfg["paths"]["parsed"])
+    client = QdrantClient(url=cfg["qdrant"]["url"], timeout=60.0)
+
+    updated = 0
+    for json_file in sorted(parsed.glob("*.json")):
+        if json_file.name == "profile.json":
+            continue
+        try:
+            doc = IntermediateDoc.model_validate_json(json_file.read_text(encoding="utf-8"))
+            meta = base_meta(doc)
+            client.set_payload(
+                collection,
+                payload={k: v for k, v in meta.items() if v is not None},
+                points=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="doc_id", match=models.MatchValue(value=doc.meta.doc_id)
+                        )
+                    ]
+                ),
+            )
+            updated += 1
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"  [跳过] {json_file.name}: {exc}")
+    with_date = client.count(
+        collection,
+        count_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="doc_date", range=models.DatetimeRange(gte="2000-01-01T00:00:00")
+                )
+            ]
+        ),
+    ).count
+    total = client.count(collection).count
+    typer.echo(f"已更新 {updated} 篇文档的 payload")
+    typer.echo(f"doc_date 覆盖率：{with_date}/{total} = {with_date / max(total, 1):.1%}")
 
 
 @app.command()

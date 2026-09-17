@@ -53,6 +53,26 @@ class HybridRetriever:
         qvec = self.embedder.embed([question])[0]
         qfilter = self._build_filter(filters)
 
+        results = self._query(
+            question, qvec, qfilter, mode, pool, limit, aggregate
+        )
+        # 元数据过滤回退保护：字段稀疏时过滤可能清空结果（见 PLAN §5.3），
+        # 结果过少则去掉过滤重试，保证不因过滤把正确答案滤没
+        if qfilter is not None and len(results) < min(3, limit):
+            results = self._query(question, qvec, None, mode, pool, limit, aggregate)
+        return results
+
+    def _query(
+        self,
+        question: str,
+        qvec: list[float],
+        qfilter: models.Filter | None,
+        mode: str,
+        pool: int,
+        limit: int,
+        aggregate: bool,
+    ) -> list[dict]:
+
         if mode == "dense":
             response = self.client.query_points(
                 self.collection,

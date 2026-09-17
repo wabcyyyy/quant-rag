@@ -34,6 +34,8 @@ retrieval:
   k_bm25: 20
   rrf_k: 60 # RRF 平滑常数（当前由 Qdrant 服务端实现；留作调参备忘）
   fusion_limit: 12 # 融合后送下游（Rerank/合成）的块数
+  aggregate_pool: 50 # 聚合检索的候选池
+  aggregate_top_n: 25 # 聚合题自动放宽后的预算（实测覆盖率随预算单调上升）
   rerank_top_n: 6
   parent_expand: true
 

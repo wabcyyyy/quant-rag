@@ -24,6 +24,7 @@ def _pipeline():
     from doc_rag.generate.synthesizer import Synthesizer
     from doc_rag.ingest.embedder import Embedder
     from doc_rag.retrieve.hybrid import HybridRetriever
+    from doc_rag.retrieve.rewrite import QueryRewriter
 
     cfg = load_config()
     retriever = HybridRetriever(
@@ -32,7 +33,7 @@ def _pipeline():
         collection=cfg["qdrant"]["collection"],
         retrieval_cfg=cfg["retrieval"],
     )
-    return cfg, retriever, Synthesizer(cfg["llm"])
+    return cfg, retriever, Synthesizer(cfg["llm"]), QueryRewriter(cfg["retrieval"])
 
 
 @app.get("/health")
@@ -42,10 +43,16 @@ def health() -> dict:
 
 @app.post("/query")
 def query(body: QueryIn) -> dict:
-    cfg, retriever, synthesizer = _pipeline()
+    cfg, retriever, synthesizer, rewriter = _pipeline()
     if body.kb:
         retriever.collection = body.kb
-    results = retriever.retrieve(body.question, top_n=body.top_n)
+    plan = rewriter.rewrite(body.question)
+    results = retriever.retrieve(
+        plan["rewritten"],
+        top_n=body.top_n or plan["top_n"],
+        filters=plan["filters"],
+        aggregate=plan["aggregate"],
+    )
     contexts = [
         {
             "no": i + 1,
@@ -58,6 +65,7 @@ def query(body: QueryIn) -> dict:
     answer = synthesizer.answer(body.question, contexts)
     return {
         "question": body.question,
+        "rewrite": plan,
         "answer": answer,
         "citations": [
             {"no": c["no"], "doc": c["doc"], "page": c["page"], "doc_id": r["doc_id"]}
