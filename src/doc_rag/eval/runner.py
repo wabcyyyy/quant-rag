@@ -1,0 +1,247 @@
+"""客观指标评估器（PLAN §5.3 双轨的确定性一轨）。
+
+指标（不依赖 LLM judge，可复现）：
+- Recall@5 / Recall@top_n：黄金来源文档是否被检回
+- MRR：首个命中来源的排名倒数
+- contains_acc：非拒答题答案包含全部 must_contain 关键词
+- refusal_acc：拒答题正确拒答（出现拒答语且未编造 must_contain）
+- citation_valid_rate：答案中 [n] 引用编号全部落在上下文范围内
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+
+from qdrant_client import QdrantClient
+
+from ..config import load_config
+from ..generate.synthesizer import Synthesizer
+from ..ingest.embedder import Embedder
+from ..retrieve.hybrid import HybridRetriever
+from .schema import GoldItem
+
+_REFUSAL_MARKERS = [
+    "无法回答", "无法确定", "未形成决议", "未记载", "未提到", "没有提到",
+    "缺少", "没有足够", "未能找到", "根据现有文档", "没有讨论", "未讨论",
+]
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", "", s or "")
+
+
+def _build_retriever(cfg: dict, collection: str | None) -> tuple[HybridRetriever, Synthesizer]:
+    retriever = HybridRetriever(
+        client=QdrantClient(url=cfg["qdrant"]["url"], timeout=60.0),
+        embedder=Embedder(cfg["embedding"]),
+        collection=collection or cfg["qdrant"]["collection"],
+        retrieval_cfg=cfg["retrieval"],
+    )
+    return retriever, Synthesizer(cfg["llm"])
+
+
+def _refusal_ok(answer: str) -> bool:
+    return any(marker in answer for marker in _REFUSAL_MARKERS)
+
+
+def _contexts(results: list[dict]) -> list[dict]:
+    return [
+        {"no": i + 1, "text": r["text"], "doc": r["title"] or r["doc_id"], "page": r["page"]}
+        for i, r in enumerate(results)
+    ]
+
+
+def evaluate(
+    gold_file: Path,
+    cfg: dict | None = None,
+    collection: str | None = None,
+    top_n: int = 8,
+    limit: int | None = None,
+    with_ragas: bool = False,
+    with_answers: bool = True,
+) -> dict:
+    cfg = cfg or load_config()
+    retriever, synthesizer = _build_retriever(cfg, collection)
+    payload = json.loads(gold_file.read_text(encoding="utf-8"))
+    items_raw = payload["items"][:limit] if limit else payload["items"]
+    items = [GoldItem.model_validate(i) for i in items_raw]
+
+    per_item: list[dict] = []
+    for item in items:
+        results = retriever.retrieve(item.question, top_n=top_n)
+        got_ids = [r["doc_id"] for r in results]
+        hit_ranks = [got_ids.index(s) + 1 for s in item.source_doc_ids if s in got_ids]
+        first_rank = min(hit_ranks) if hit_ranks else None
+
+        ctx = _contexts(results)
+        answer = synthesizer.answer(item.question, ctx) if with_answers else ""
+
+        if not with_answers:
+            answered_ok = None  # 检索模式不评回答
+        elif item.refusable:
+            answered_ok = _refusal_ok(answer)
+        elif item.must_contain:
+            answered_ok = all(
+                _norm(m) in _norm(answer) for m in item.must_contain
+            )
+        else:
+            answered_ok = None  # 无判据（如部分聚合题），不计入 answer 准确率
+
+        refs = [int(n) for n in _CITATION_RE.findall(answer)]
+        citation_valid = all(1 <= n <= len(ctx) for n in refs) if refs else None
+
+        per_item.append(
+            {
+                "id": item.id,
+                "type": item.type,
+                "question": item.question,
+                "first_hit_rank": first_rank,
+                "answered_ok": answered_ok,
+                "citation_valid": citation_valid,
+                "n_citations": len(refs),
+                "answer": answer,
+                "contexts": [c["text"] for c in ctx],
+            }
+        )
+
+    # 聚合（no_answer 题无来源文档，不计入 Recall/MRR 分母，由 refusal_acc 单独评）
+    with_source = [
+        r for r in per_item if not _is_refusable(items, r["id"])
+    ]
+    hits5 = [r for r in with_source if r["first_hit_rank"] and r["first_hit_rank"] <= 5]
+    hitsN = [r for r in with_source if r["first_hit_rank"]]
+    mrr_scores = [1.0 / r["first_hit_rank"] for r in with_source if r["first_hit_rank"]]
+    scorable = [
+        r for r in per_item
+        if not _is_refusable(items, r["id"]) and r["answered_ok"] is not None
+    ]
+    refusables = [r for r in per_item if _is_refusable(items, r["id"])]
+    cites = [r for r in per_item if r["citation_valid"] is not None]
+
+    summary = {
+        "n_items": len(per_item),
+        "recall_at_5": len(hits5) / len(with_source),
+        f"recall_at_{top_n}": len(hitsN) / len(with_source),
+        "mrr": sum(mrr_scores) / len(with_source),
+        "contains_acc": _safe_div(
+            sum(1 for r in scorable if r["answered_ok"]), len(scorable)
+        ),
+        "refusal_acc": _safe_div(
+            sum(1 for r in refusables if r["answered_ok"]), len(refusables)
+        ),
+        "citation_valid_rate": _safe_div(
+            sum(1 for r in cites if r["citation_valid"]), len(cites)
+        ),
+    }
+
+    ragas_summary = None
+    if with_ragas:
+        rows = [
+            {
+                "user_input": item.question,
+                "response": r["answer"],
+                "retrieved_contexts": r.get("contexts") or [],
+            }
+            for item, r in zip(items, per_item)
+            if not item.refusable and r["answer"]
+        ]
+        ragas_summary = _run_ragas(rows, cfg)
+
+    results = {
+        "meta": {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "top_n": top_n,
+            "collection": retriever.collection,
+            "retrieval": "dense+bm25+rrf",
+            "with_answers": with_answers,
+        },
+        "summary": summary,
+        "ragas": ragas_summary,
+        "items": per_item,
+    }
+    return results
+
+
+def _is_refusable(items: list[GoldItem], item_id: str) -> bool:
+    return next((i.refusable for i in items if i.id == item_id), False)
+
+
+def _safe_div(a: float, b: float) -> float | None:
+    return round(a / b, 4) if b else None
+
+
+def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
+    """RAGAS 第二轨：rows=[{user_input, response, retrieved_contexts}] → judge 指标。
+
+    可信度口径（PLAN §5.3）：judge 固定模型、temperature=0；只看与客观指标的相对一致性。
+    """
+    try:
+        from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+        from ragas import EvaluationDataset, evaluate as ragas_evaluate
+        from ragas.embeddings import LangchainEmbeddingsWrapper
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.metrics import AnswerRelevancy, Faithfulness
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"ragas 不可用：{exc}"}
+
+    llm_cfg = cfg["llm"]
+    judge = LangchainLLMWrapper(
+        ChatOpenAI(
+            model=llm_cfg["model"],
+            base_url=llm_cfg["base_url"],
+            api_key=llm_cfg["api_key"],
+            temperature=0,
+        )
+    )
+    # AnswerRelevancy 需要嵌入模型：用 SiliconFlow 的 BGE-M3（DeepSeek 无 embedding API）
+    emb_cfg = cfg["embedding"]
+    embeddings = LangchainEmbeddingsWrapper(
+        OpenAIEmbeddings(
+            model=emb_cfg["model"],
+            base_url=emb_cfg["base_url"],
+            api_key=emb_cfg["api_key"],
+        )
+    )
+    try:
+        ds = EvaluationDataset.from_list(rows)
+        out = ragas_evaluate(
+            dataset=ds,
+            metrics=[Faithfulness(), AnswerRelevancy()],
+            llm=judge,
+            embeddings=embeddings,
+        )
+        df = out.to_pandas()
+        return {
+            "faithfulness": round(float(df["faithfulness"].mean()), 4),
+            "answer_relevancy": round(float(df["answer_relevancy"].mean()), 4),
+            "n": len(rows),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"ragas 运行失败：{exc}"}
+
+
+def ragas_from_results(results_file: Path, cfg: dict | None = None) -> dict | None:
+    """对已保存的评估结果补跑 RAGAS：答案复用，上下文缺失时免费重检索。"""
+    cfg = cfg or load_config()
+    data = json.loads(results_file.read_text(encoding="utf-8"))
+    retriever, _ = _build_retriever(cfg, data["meta"].get("collection"))
+    rows = []
+    for item in data["items"]:
+        if item["type"] == "no_answer" or not item.get("answer"):
+            continue
+        contexts = item.get("contexts")
+        if not contexts:
+            results = retriever.retrieve(item["question"], top_n=6)
+            contexts = [r["text"] for r in results]
+        rows.append(
+            {
+                "user_input": item["question"],
+                "response": item["answer"],
+                "retrieved_contexts": contexts,
+            }
+        )
+    return _run_ragas(rows, cfg)
