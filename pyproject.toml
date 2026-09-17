@@ -1,0 +1,59 @@
+[project]
+name = "doc-rag"
+version = "0.1.0"
+description = "企业文档 RAG：飞书 / Office / PDF 多源接入 · BGE-M3 Dense+Sparse · 评估闭环（设计见 PLAN.md）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pymupdf>=1.24",
+    "mammoth>=1.8",
+    "qdrant-client>=1.12",
+    "openai>=1.40",
+    "python-dotenv>=1.0",
+    "jieba>=0.42",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+eval = [
+    "ragas",
+    "datasets",
+    "pillow",  # ragas 0.3.x 未声明但 multi_modal_prompt 需要
+    # ragas 0.3.x 与 langchain 1.x 不兼容（chat_models.vertexai 已移除），钉 0.3 系
+    "langchain>=0.3,<0.4",
+    "langchain-community>=0.3,<0.4",
+    "langchain-core>=0.3,<0.4",
+    "langchain-openai>=0.3,<1",
+]
+
+[project.scripts]
+doc-rag = "doc_rag.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doc_rag"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+# 国内镜像（直连 PyPI 超时）；换源可改 url
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.pytest.ini_options]
+# 本机 AppData 临时目录存在权限拦截，测试产物落在项目内
+addopts = "--basetemp=.pytest_tmp"
+
+

@@ -1,0 +1,48 @@
+# 配置说明：值为 "env:VAR" 的字段从环境变量读取，避免密钥落盘。
+
+paths:
+  raw: data/raw
+  parsed: data/parsed
+  eval: data/eval
+
+feishu:
+  enabled: false # 待企业自建应用权限（PLAN §9 行动项 2）
+  app_id: ""
+  app_secret: ""
+  root_folder_token: ""
+
+embedding:
+  # BGE-M3 via OpenAI 兼容 API（如 SiliconFlow）；开工首日实测是否返回 sparse 权重（PLAN §8）
+  base_url: env:DOC_RAG_EMBEDDING_BASE_URL
+  api_key: env:DOC_RAG_EMBEDDING_API_KEY
+  model: BAAI/bge-m3
+  dense_dim: 1024
+  sparse: true
+
+llm:
+  base_url: env:DOC_RAG_LLM_BASE_URL
+  api_key: env:DOC_RAG_LLM_API_KEY
+  model: env:DOC_RAG_LLM_MODEL # judge 与合成同源（PLAN §5.3 评估可信度口径）
+  temperature: 0.0
+
+qdrant:
+  url: http://localhost:6333
+  collection: doc_rag_demo
+
+retrieval:
+  k_dense: 20
+  k_bm25: 20
+  rrf_k: 60 # RRF 平滑常数（当前由 Qdrant 服务端实现；留作调参备忘）
+  fusion_limit: 12 # 融合后送下游（Rerank/合成）的块数
+  rerank_top_n: 6
+  parent_expand: true
+
+metadata_extraction:
+  enabled: true
+  fields: [date, meeting_type, attendees, topics, decisions]
+
+eval:
+  gold_file: data/eval/gold.json
+  judge:
+    temperature: 0.0
+    repeat: 2 # 每指标跑两遍看方差（PLAN §5.3）

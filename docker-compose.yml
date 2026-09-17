@@ -1,0 +1,15 @@
+services:
+  qdrant:
+    # 需要 ≥1.15（内置 qdrant/bm25 稀疏模型，PLAN §5.2）；升级时锁定具体 tag
+    # Docker Hub 直连超时的机器，先手动拉镜像再 compose up：
+    #   docker pull docker.m.daocloud.io/qdrant/qdrant:latest
+    #   docker tag docker.m.daocloud.io/qdrant/qdrant:latest qdrant/qdrant:latest
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:

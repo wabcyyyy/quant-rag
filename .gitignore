@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# 环境变量
+.env
+
+# 公司语料与解析产物——严禁入库（合规，见 PLAN §8）
+data/raw/*
+data/parsed/*
+!data/raw/.gitkeep
+!data/parsed/.gitkeep
+# 评估黄金集含公司内容，默认不入库；如需版本管理放私有仓
+data/eval/*.json
+
+# 工具缓存
+.pytest_cache/
+.pytest_tmp/
+.ruff_cache/
+.ipynb_checkpoints/
