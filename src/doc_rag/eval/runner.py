@@ -387,7 +387,7 @@ def evaluate(
 
     results = {
         "meta": {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
             "top_n": top_n,
             "collection": retriever.collection,
             "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
@@ -614,7 +614,8 @@ def _run_ragas(
         from langchain.globals import set_llm_cache
         from langchain_community.cache import SQLiteCache
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-        from ragas import EvaluationDataset, evaluate as ragas_evaluate
+        from ragas import EvaluationDataset
+        from ragas import evaluate as ragas_evaluate
         from ragas.embeddings import LangchainEmbeddingsWrapper
         from ragas.llms import LangchainLLMWrapper
         from ragas.metrics import AnswerRelevancy, Faithfulness
@@ -636,7 +637,7 @@ def _run_ragas(
             judge_cache_path = str(_llm_cache_path.parent / "judge_cache.sqlite")
             Path(judge_cache_path).parent.mkdir(parents=True, exist_ok=True)
             set_llm_cache(SQLiteCache(database_path=judge_cache_path))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             set_llm_cache(None)
             # 静默降级 = 无缓存跑完全量 judge（实付约 10 倍）。宁可失败也不白花。
             raise RuntimeError(
@@ -653,7 +654,6 @@ def _run_ragas(
     if not metrics:
         return {"skipped": f"未配置有效指标：{wanted}"}
 
-    llm_cfg = cfg["llm"]
     judge = LangchainLLMWrapper(ChatOpenAI(**_judge_chat_kwargs(cfg), max_retries=0))
     # AnswerRelevancy 需要嵌入模型：用 SiliconFlow 的 BGE-M3（DeepSeek 无 embedding API）
     emb_cfg = cfg["embedding"]
@@ -871,7 +871,7 @@ def ragas_from_results(
     summary["contexts_rebuilt"] = rebuilt
     payload = {
         "meta": {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
             "source_results": results_file.name,
             "collection": meta.get("collection"),
             "retrieval": meta.get("retrieval"),

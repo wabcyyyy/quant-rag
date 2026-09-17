@@ -144,7 +144,7 @@ def cache_stats() -> dict:
         conn = _conn()
         total = conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
         conn.close()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110  # 缓存库不可用（锁/损坏）只丢统计，不拖垮查询主流程
         pass
     with _LOCK:
         hit, miss = _STATS["hit"], _STATS["miss"]

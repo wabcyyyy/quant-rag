@@ -7,8 +7,8 @@ TODO(Phase 1 后半)：doc 级 LLM 元数据抽取 → BGE-M3 Embed → Qdrant u
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .office import extract_office
 from .pdf import extract_pdf

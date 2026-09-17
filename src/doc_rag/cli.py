@@ -95,7 +95,7 @@ def check() -> None:
         # 单句 ping，与真实合成的量级差一个数量级。要测延迟用 eval 的延迟摘要。
         typer.echo("      注：这是连通性 ping 延迟（无上下文、无 system prompt），≠ 合成延迟；")
         typer.echo("          合成延迟见 `doc-rag eval` 的延迟摘要（需关缓存才准）")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         typer.echo(f"[LLM] 失败：{exc}")
         raise typer.Exit(1) from exc
 
@@ -109,7 +109,7 @@ def check() -> None:
         )
         r.raise_for_status()
         payload = r.json()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         typer.echo(f"[Embedding] 失败：{exc}")
         raise typer.Exit(1) from exc
     dt = time.perf_counter() - t0
@@ -454,7 +454,7 @@ def evaluate(
     out_dir.mkdir(parents=True, exist_ok=True)
     # --ragas-out 同时给直跑路径用：三组对照（T4）要求每组结果落在指定文件名上，
     # 时间戳文件名无法预先写进 compare-ragas 的命令行
-    out_file = ragas_out or out_dir / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    out_file = ragas_out or out_dir / f"results_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}.json"
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     typer.echo(f"明细已写入 {out_file}")
@@ -523,7 +523,6 @@ def backfill(
 
     动机：元数据规则演进（如 doc_date 增补正文抽取）后无需重灌全库。
     """
-    import json
 
     from qdrant_client import QdrantClient, models
 

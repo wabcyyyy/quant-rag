@@ -17,7 +17,6 @@ from collections import Counter
 from pathlib import Path
 
 from ..generate import llm
-from ..ingest.metadata import parse_llm_json
 from .schema import GoldItem
 
 _PER_DOC_TYPES = ["fact", "decision", "open_discussion", "term"]
@@ -56,17 +55,22 @@ _NO_ANSWER_CANDIDATES = [
     "年终奖发放", "年休假天数", "五险一金缴纳比例", "加班补贴",
 ]
 
-_STOPWORDS = set(
-    "会议 讨论 决定 汇报 跟进 安排 进行 相关 工作 内容 情况 问题 要求 完成 确认 通知 "
-    "公司 项目 部分 以下 以上 今天 明天 昨天 时间 地点 人员 同志 各位 大家 继续 针对 "
-    "目前 需要 可以 应该 已经 会上 关于 我们 他们 自己 很多 非常 "
+_STOPWORDS = {
+    "会议", "讨论", "决定", "汇报", "跟进", "安排", "进行", "相关", "工作", "内容",
+    "情况", "问题", "要求", "完成", "确认", "通知", "公司", "项目", "部分", "以下",
+    "以上", "今天", "明天", "昨天", "时间", "地点", "人员", "同志", "各位", "大家",
+    "继续", "针对", "目前", "需要", "可以", "应该", "已经", "会上", "关于", "我们",
+    "他们", "自己", "很多", "非常",
     # 实测噪声（首版跨文档/时间题选词质量差，Phase 2 记录）
-    "处理结果 本处 校正 文本处理 代码运行 case dta 议题 纪要 与会 本次 执行 owner 结果 "
-    "记录 文档 文件 首页 未命名 信息 数据 系统 流程 管理 服务 支持 使用 建议 "
+    "处理结果", "本处", "校正", "文本处理", "代码运行", "case", "dta", "议题",
+    "纪要", "与会", "本次", "执行", "owner", "结果", "记录", "文档", "文件", "首页",
+    "未命名", "信息", "数据", "系统", "流程", "管理", "服务", "支持", "使用", "建议",
     # 会议纪要模板词（跨全库出现，无区分度）
-    "提案 提案者 附议 附议区 决议 决议区 动议 动议区 辩论 辩论区 投票 投票区 元数据 元数据区 "
-    "同意 否决 弃权 单选 实名 立即 后续 备注 说明 附件 版本 编号 目录 标题 正文 摘要".split()
-)
+    "提案", "提案者", "附议", "附议区", "决议", "决议区", "动议", "动议区", "辩论",
+    "辩论区", "投票", "投票区", "元数据", "元数据区", "同意", "否决", "弃权", "单选",
+    "实名", "立即", "后续", "备注", "说明", "附件", "版本", "编号", "目录", "标题",
+    "正文", "摘要",
+}
 
 # 人名实体抽取：只用高精度结构信号（实测零噪声，见 Phase 2 记录）
 _NAME_CONTEXT_RES = (
@@ -136,7 +140,7 @@ def _load_docs(parsed_dir: Path) -> list[dict]:
             continue
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S112  # 坏导出直接跳过，不让单份文件中断整轮出题
             continue
         title = data.get("meta", {}).get("title") or json_file.stem
         text = "\n".join(b.get("text", "") for b in data.get("blocks", []) if b.get("text"))
@@ -183,7 +187,7 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
         reply = llm.chat(llm_cfg, prompt, temperature=0)
     except Exception:  # noqa: BLE001
         return []
-    m = re.search(r"\[.*\]", reply, re.S)
+    m = re.search(r"\[.*\]", reply, re.DOTALL)
     if not m:
         return []
     try:

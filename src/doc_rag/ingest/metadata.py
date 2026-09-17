@@ -65,7 +65,7 @@ def parse_llm_json(text: str) -> dict | None:
     """容忍 ```json 围栏与前后杂文本；解析失败返回 None。"""
     if not text:
         return None
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidate = fenced.group(1) if fenced else text
     start, end = candidate.find("{"), candidate.rfind("}")
     if start == -1 or end <= start:

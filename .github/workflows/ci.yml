@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 版本与 .python-version（3.12）钉死；缓存 uv 依赖
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      # --frozen：锁文件必须与 pyproject 一致，不静默重解析
+      - run: uv sync --frozen
+
+      # 全部离线 mock，零 API 成本（不需要任何密钥）
+      - run: uv run ruff check .
+      - run: uv run pytest -q
