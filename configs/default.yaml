@@ -56,6 +56,7 @@ metadata_extraction:
 
 eval:
   gold_file: data/eval/gold.json
+  ragas_sample: 25 # RAGAS 只评前 N 条（0=全量）；judge 调用量大，抽样校准趋势即可
   judge:
     temperature: 0.0
     repeat: 2 # 每指标跑两遍看方差（PLAN §5.3）

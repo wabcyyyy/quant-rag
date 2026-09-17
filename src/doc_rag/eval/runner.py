@@ -130,6 +130,7 @@ def evaluate(
 
         refs = [int(n) for n in _CITATION_RE.findall(answer)]
         citation_valid = all(1 <= n <= len(ctx) for n in refs) if refs else None
+        citation_present = bool(refs) if answer else None
 
         per_item.append(
             {
@@ -141,6 +142,7 @@ def evaluate(
                 "n_source_docs": len(item.source_doc_ids),
                 "answered_ok": answered_ok,
                 "citation_valid": citation_valid,
+                "citation_present": citation_present,
                 "n_citations": len(refs),
                 "answer": answer,
                 "contexts": [c["text"] for c in ctx],
@@ -178,6 +180,11 @@ def evaluate(
         "citation_valid_rate": _safe_div(
             sum(1 for r in cites if r["citation_valid"]), len(cites)
         ),
+        # 引用存在率：无引用也算未遵守（否则「从不引用」的模型会显示 None 而非 0）
+        "citation_presence_rate": _safe_div(
+            sum(1 for r in per_item if r["citation_present"]),
+            sum(1 for r in per_item if r["citation_present"] is not None),
+        ),
         "coverage_by_type": {
             t: round(
                 sum(r["doc_coverage"] for r in per_item if r["type"] == t and r["doc_coverage"] is not None)
@@ -190,16 +197,21 @@ def evaluate(
 
     ragas_summary = None
     if with_ragas:
-        rows = [
-            {
-                "user_input": item.question,
-                "response": r["answer"],
-                "retrieved_contexts": r.get("contexts") or [],
-            }
-            for item, r in zip(items, per_item)
-            if not item.refusable and r["answer"]
-        ]
-        ragas_summary = _run_ragas(rows, cfg)
+    rows = [
+        {
+            "user_input": item.question,
+            "response": r["answer"],
+            "retrieved_contexts": r.get("contexts") or [],
+        }
+        for item, r in zip(items, per_item)
+        if not item.refusable and r["answer"]
+    ]
+    # 成本杠杆：RAGAS 是调用大户（每指标每条 ≈1 次 judge 调用），
+    # 抽样即可校准趋势（PLAN §5.3：只报相对变化）。0 或未设 = 全量。
+    sample_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
+    if sample_n and sample_n < len(rows):
+        rows = rows[:sample_n]
+    ragas_summary = _run_ragas(rows, cfg)
 
     results = {
         "meta": {

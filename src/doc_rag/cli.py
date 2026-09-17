@@ -302,6 +302,7 @@ def evaluate(
     typer.echo(f"包含匹配准确率   : {s['contains_acc']}")
     typer.echo(f"拒答正确率      : {s['refusal_acc']}")
     typer.echo(f"引用有效率      : {s['citation_valid_rate']}")
+    typer.echo(f"引用存在率      : {s.get('citation_presence_rate')}")
     typer.echo(f"文档覆盖率      : {s['mean_doc_coverage']}")
     typer.echo(f"  分题型覆盖率  : {s['coverage_by_type']}")
     if results.get("ragas"):
