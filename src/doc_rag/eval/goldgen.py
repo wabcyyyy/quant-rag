@@ -47,8 +47,13 @@ _TYPE_RULES = {
 }
 
 _NO_ANSWER_CANDIDATES = [
-    "报销标准", "年终奖发放", "远程办公制度", "股权激励", "年休假天数",
-    "差旅费标准", "五险一金缴纳比例", "绩效考核等级",
+    # 选材原则（Phase 2 实测教训）：不仅要「关键词不在语料」，还要**语义不相邻**。
+    # 反例：问「员工持股计划」——关键词确实不存在，但语料有 ESOP/股权激励内容，
+    # 题目实质可答；问「岗位职级体系」同理（语料有职级表）。
+    # 故优先取公司内部会议纪要不可能覆盖的域外主题。
+    "碳排放配额交易", "ISO14001环境认证", "对外担保额度", "内幕信息管理",
+    "反垄断合规审查", "知识产权许可费", "董监高责任保险", "员工商业保险方案",
+    "年终奖发放", "年休假天数", "五险一金缴纳比例", "加班补贴",
 ]
 
 _STOPWORDS = set(
@@ -244,11 +249,18 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
 
 
 def _no_answer_items(docs: list[dict]) -> list[GoldItem]:
-    corpus_text = "\n".join(d["text"] for d in docs)
+    """无答案题：题目主题在语料中**语义不存在**才成立。
+
+    实测教训：仅检查整句短语不存在是不够的——「公司关于差旅费标准的制度」这个短语
+    确实不存在，但语料里有「差旅费由基础差旅和弹性差旅构成」，题目其实可答。
+    因此按关键词逐项校验：主题词任一部分出现在语料中即弃用。
+    """
+    corpus = _norm("\n".join(d["text"] for d in docs))
     items = []
     for topic in _NO_ANSWER_CANDIDATES:
-        if topic in corpus_text:
-            continue
+        parts = [p for p in re.split(r"[标准制度规定比例天数]", topic) if len(p) >= 2]
+        if any(_norm(p) in corpus for p in parts):
+            continue  # 语料含相关内容 → 题目不成立
         items.append(
             GoldItem(
                 id="", type="no_answer",

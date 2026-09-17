@@ -117,7 +117,8 @@ def ingest(
     parse_only: Annotated[bool, typer.Option(help="只解析落盘，不向量化入库")] = False,
     recreate: Annotated[bool, typer.Option(help="先删除并重建 collection（清空重灌）")] = False,
     limit: Annotated[int | None, typer.Option(help="只处理前 N 个文件（试跑）")] = None,
-    no_llm_meta: Annotated[bool, typer.Option(help="跳过 LLM 元数据抽取（只用文件名信号）")] = False,
+    no_llm_meta: Annotated[bool, typer.Option(help="（已废弃，默认即不抽取；用 --llm-meta 开启）")] = False,
+    llm_meta: Annotated[bool, typer.Option(help="启用 LLM 元数据抽取（1130 篇 ≈1130 次调用，成本高，默认关）")] = False,
     chunk_strategy: Annotated[str, typer.Option(help="分块策略：structural（默认）/ fixed（消融对照）")] = "structural",
     index_only: Annotated[bool, typer.Option(help="跳过解析，直接对已有中间 JSON 入库")] = False,
 ) -> None:
@@ -150,7 +151,7 @@ def ingest(
         cfg,
         collection=collection,
         recreate=recreate,
-        use_llm_meta=not no_llm_meta,
+        use_llm_meta=llm_meta,  # 默认关：文件名信号已覆盖日期/大类，LLM 抽取成本高（PLAN §8）
         chunk_strategy=chunk_strategy,
     )
     typer.echo(
@@ -307,6 +308,13 @@ def evaluate(
     typer.echo(f"  分题型覆盖率  : {s['coverage_by_type']}")
     if results.get("ragas"):
         typer.echo(f"RAGAS           : {results['ragas']}")
+    from doc_rag.generate.llm import cache_stats
+
+    st = cache_stats()
+    typer.echo(
+        f"LLM 缓存        : 命中 {st['hit']} / 未命中 {st['miss']}"
+        f"（命中率 {st['hit_rate']}，库内共 {st['cached_total']} 条）"
+    )
 
     out_dir = Path(cfg["paths"]["eval"])
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -22,3 +22,6 @@ data/eval/*.json
 .pytest_tmp/
 .ruff_cache/
 .ipynb_checkpoints/
+
+# LLM 响应缓存（本地，可随时删除）
+.cache/

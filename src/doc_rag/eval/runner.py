@@ -61,7 +61,21 @@ def _refusal_ok(answer: str) -> bool:
     return any(marker in answer for marker in _REFUSAL_MARKERS)
 
 
-def _contexts(results: list[dict]) -> list[dict]:
+def _contains_loose(keyword: str, answer: str) -> bool:
+    """宽松包含：关键词的字符按序出现即算命中（容忍「整理纪要」vs「整理会议纪要」）。"""
+    pos = 0
+    target = _norm(keyword)
+    hay = _norm(answer)
+    for ch in hay:
+        if pos < len(target) and ch == target[pos]:
+            pos += 1
+    return pos == len(target)
+
+
+def _contexts(results: list[dict], max_n: int | None = None) -> list[dict]:
+    """构造送 LLM 的编号上下文；max_n 控制上限以约束输入 token（PLAN §8 成本控制）。"""
+    if max_n:
+        results = results[:max_n]
     return [
         {"no": i + 1, "text": r["text"], "doc": r["title"] or r["doc_id"], "page": r["page"]}
         for i, r in enumerate(results)
@@ -114,19 +128,30 @@ def evaluate(
             else None
         )
 
-        ctx = _contexts(results)
+        ctx = _contexts(
+            results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
+        )
         answer = synthesizer.answer(item.question, ctx) if with_answers else ""
 
         if not with_answers:
             answered_ok = None  # 检索模式不评回答
+            answered_ok_loose = None
+            over_refusal = None
         elif item.refusable:
             answered_ok = _refusal_ok(answer)
+            answered_ok_loose = answered_ok
+            over_refusal = None
         elif item.must_contain:
-            answered_ok = all(
-                _norm(m) in _norm(answer) for m in item.must_contain
-            )
+            answered_ok = all(_norm(m) in _norm(answer) for m in item.must_contain)
+            answered_ok_loose = all(_contains_loose(m, answer) for m in item.must_contain)
+            # 过度拒答：声称无法回答，但上下文里其实含有关键信息
+            ctx_text = _norm(" ".join(c["text"] for c in ctx))
+            ctx_has = all(_norm(m) in ctx_text for m in item.must_contain)
+            over_refusal = bool(_refusal_ok(answer) and ctx_has)
         else:
             answered_ok = None  # 无判据（如部分聚合题），不计入 answer 准确率
+            answered_ok_loose = None
+            over_refusal = None
 
         refs = [int(n) for n in _CITATION_RE.findall(answer)]
         citation_valid = all(1 <= n <= len(ctx) for n in refs) if refs else None
@@ -141,6 +166,8 @@ def evaluate(
                 "doc_coverage": round(coverage, 4) if coverage is not None else None,
                 "n_source_docs": len(item.source_doc_ids),
                 "answered_ok": answered_ok,
+                "answered_ok_loose": answered_ok_loose,
+                "over_refusal": over_refusal,
                 "citation_valid": citation_valid,
                 "citation_present": citation_present,
                 "n_citations": len(refs),
@@ -174,6 +201,15 @@ def evaluate(
         "contains_acc": _safe_div(
             sum(1 for r in scorable if r["answered_ok"]), len(scorable)
         ),
+        # 宽松包含（容忍改写）：与严格值一起看，差值即「度量伪影」大小
+        "contains_acc_loose": _safe_div(
+            sum(1 for r in scorable if r["answered_ok_loose"]), len(scorable)
+        ),
+        # 过度拒答：上下文含关键信息却答「无法回答」
+        "over_refusal_rate": _safe_div(
+            sum(1 for r in per_item if r["over_refusal"]),
+            sum(1 for r in per_item if r["over_refusal"] is not None),
+        ),
         "refusal_acc": _safe_div(
             sum(1 for r in refusables if r["answered_ok"]), len(refusables)
         ),
@@ -197,21 +233,21 @@ def evaluate(
 
     ragas_summary = None
     if with_ragas:
-    rows = [
-        {
-            "user_input": item.question,
-            "response": r["answer"],
-            "retrieved_contexts": r.get("contexts") or [],
-        }
-        for item, r in zip(items, per_item)
-        if not item.refusable and r["answer"]
-    ]
-    # 成本杠杆：RAGAS 是调用大户（每指标每条 ≈1 次 judge 调用），
-    # 抽样即可校准趋势（PLAN §5.3：只报相对变化）。0 或未设 = 全量。
-    sample_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
-    if sample_n and sample_n < len(rows):
-        rows = rows[:sample_n]
-    ragas_summary = _run_ragas(rows, cfg)
+        rows = [
+            {
+                "user_input": item.question,
+                "response": r["answer"],
+                "retrieved_contexts": r.get("contexts") or [],
+            }
+            for item, r in zip(items, per_item)
+            if not item.refusable and r["answer"]
+        ]
+        # 成本杠杆：RAGAS 是调用大户（每指标每条 ≈1 次 judge 调用），
+        # 抽样即可校准趋势（PLAN §5.3：只报相对变化）。0 或未设 = 全量。
+        sample_n = int((cfg.get("eval") or {}).get("ragas_sample") or 0)
+        if sample_n and sample_n < len(rows):
+            rows = rows[:sample_n]
+        ragas_summary = _run_ragas(rows, cfg)
 
     results = {
         "meta": {
@@ -253,6 +289,13 @@ def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         return {"error": f"ragas 不可用：{exc}"}
 
+    # 指标可选（PLAN §8 成本控制）：AnswerRelevancy 在中文场景噪声大且需嵌入调用
+    wanted = [m.lower() for m in (cfg.get("eval", {}).get("ragas_metrics") or ["faithfulness"])]
+    metric_map = {"faithfulness": Faithfulness(), "answer_relevancy": AnswerRelevancy()}
+    metrics = [metric_map[m] for m in wanted if m in metric_map]
+    if not metrics:
+        return {"skipped": f"未配置有效指标：{wanted}"}
+
     llm_cfg = cfg["llm"]
     judge = LangchainLLMWrapper(
         ChatOpenAI(
@@ -275,16 +318,16 @@ def _run_ragas(rows: list[dict], cfg: dict) -> dict | None:
         ds = EvaluationDataset.from_list(rows)
         out = ragas_evaluate(
             dataset=ds,
-            metrics=[Faithfulness(), AnswerRelevancy()],
+            metrics=metrics,
             llm=judge,
             embeddings=embeddings,
         )
         df = out.to_pandas()
-        return {
-            "faithfulness": round(float(df["faithfulness"].mean()), 4),
-            "answer_relevancy": round(float(df["answer_relevancy"].mean()), 4),
-            "n": len(rows),
-        }
+        summary = {"n": len(rows), "metrics": [m.name for m in metrics]}
+        for m in metrics:
+            if m.name in df.columns:
+                summary[m.name] = round(float(df[m.name].mean()), 4)
+        return summary
     except Exception as exc:  # noqa: BLE001
         return {"error": f"ragas 运行失败：{exc}"}
 
