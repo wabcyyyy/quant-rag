@@ -6,6 +6,11 @@
 - contains_acc：非拒答题答案包含全部 must_contain 关键词
 - refusal_acc：拒答题正确拒答（出现拒答语且未编造 must_contain）
 - citation_valid_rate：答案中 [n] 引用编号全部落在上下文范围内
+- 延迟：分阶段（改写/检索/重排/合成/端到端）p50/p95/max，按题型拆分
+
+延迟口径（PLAN「延迟口径」）：合成耗时只在**缓存未命中**时才算延迟；命中缓存
+返回的是本地查询耗时。只要本轮有命中，`latency.cache_contaminated` 置真，
+提示 LLM 延迟被低估——测真实延迟必须关合成缓存。
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -160,18 +166,23 @@ def evaluate(
 
     per_item: list[dict] = []
     for item in items:
+        t_item = time.perf_counter()
+        t0 = time.perf_counter()
         plan = (
             rewriter.rewrite(item.question)
             if rewriter
             else {"rewritten": item.question, "filters": None, "aggregate": aggregate, "top_n": None}
         )
+        t_rewrite = time.perf_counter()
         results = retriever.retrieve(
             plan["rewritten"],
             top_n=top_n,
             filters=plan["filters"],
             aggregate=plan["aggregate"] or aggregate,
         )
+        t_retrieve = time.perf_counter()
         results = _maybe_rerank(cfg, plan["rewritten"], results, use_rerank)
+        t_rerank = time.perf_counter()
         got_ids = [r["doc_id"] for r in results]
         hit_ranks = [got_ids.index(s) + 1 for s in item.source_doc_ids if s in got_ids]
         first_rank = min(hit_ranks) if hit_ranks else None
@@ -185,11 +196,17 @@ def evaluate(
         ctx = _contexts(
             results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
         )
-        answer = (
-            synthesizer.answer(item.question, ctx, require_citation=require_citation)
-            if with_answers
-            else ""
-        )
+        synth_meta: dict | None = None
+        if with_answers:
+            answer = synthesizer.answer(item.question, ctx, require_citation=require_citation)
+            # 计时从 Synthesizer 实例上取：answer() 的返回类型保持不变，
+            # 现有调用点与测试（Mock synthesizer）都不用改。
+            # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta。
+            candidate = getattr(synthesizer, "last_meta", None)
+            synth_meta = candidate if isinstance(candidate, dict) else None
+        else:
+            answer = ""
+        t_synth = time.perf_counter()
 
         if not with_answers:
             answered_ok = None  # 检索模式不评回答
@@ -231,6 +248,16 @@ def evaluate(
                 "n_citations": len(refs),
                 "answer": answer,
                 "contexts": _judge_contexts(ctx),
+                "latency": {
+                    "rewrite": round((t_rewrite - t0) * 1000, 1),
+                    "retrieve": round((t_retrieve - t_rewrite) * 1000, 1),
+                    "rerank": round((t_rerank - t_retrieve) * 1000, 1),
+                    # 检索侧不含 LLM：这部分与模型无关，换模型不必重测
+                    "retrieval_total": round((t_rerank - t0) * 1000, 1),
+                    "synthesize": (synth_meta or {}).get("ms") if with_answers else None,
+                    "synth_cached": bool((synth_meta or {}).get("cached")) if with_answers else None,
+                    "total": round((t_synth - t_item) * 1000, 1),
+                },
             }
         )
 
@@ -288,6 +315,9 @@ def evaluate(
             for t in sorted({r["type"] for r in per_item})
         },
     }
+    latency = _latency_summary(per_item)
+    if latency:
+        summary["latency"] = latency
 
     ragas_summary = None
     if with_ragas:
@@ -306,12 +336,81 @@ def evaluate(
             + ("+rewrite" if use_rewrite else "")
             + ("+rerank" if use_rerank else ""),
             "with_answers": with_answers,
+            # 让结果文件自证身份：延迟数字曾因「不知道是哪个模型、缓存开没开」
+            # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
+            "llm_model": (cfg.get("llm") or {}).get("model"),
+            "answer_cache": cache_enabled(cfg.get("llm") or {}) if with_answers else None,
         },
         "summary": summary,
         "ragas": ragas_summary,
         "items": per_item,
     }
     return results
+
+
+def _quantiles(values: list[float], ns: tuple[float, ...] = (50, 95)) -> dict:
+    """分位数（标准库实现，不引 numpy）。
+
+    用最近秩法（nearest-rank）：小样本下比线性插值更保守，也更贴近
+    「P95 到底有没有超 8s」这种判定——插值会给出一个任何真实请求都没出现过的值。
+    样本量不足时照常返回，但调用方应结合 n 判读（n<20 的 p95 基本等于 max）。
+    """
+    xs = sorted(v for v in values if v is not None)
+    if not xs:
+        return {}
+    out = {"n": len(xs), "min": round(xs[0], 1), "max": round(xs[-1], 1),
+           "mean": round(sum(xs) / len(xs), 1)}
+    for n in ns:
+        idx = max(0, min(len(xs) - 1, math.ceil(n / 100 * len(xs)) - 1))
+        out[f"p{int(n)}"] = round(xs[idx], 1)
+    return out
+
+
+def _latency_summary(per_item: list[dict]) -> dict | None:
+    """按阶段汇总延迟 + 按题型拆分合成与端到端。
+
+    按题型拆分不是装饰：本语料的延迟是**双峰**的——短答案（fact/term）约 2~3s，
+    聚合题（cross_doc/time_filter，答案 600~900 字）25~34s。只报一个混合 P95
+    会把尾部藏起来，也解释不了「均值达标但聚合题超 8s」。
+
+    合成分位数只在**未命中缓存**的条目上算：缓存命中的 ms 是本地查询耗时，
+    混进去会把 LLM 延迟拉到毫秒级（这正是 PLAN 里 1.3s 的来路）。
+    """
+    rows = [r for r in per_item if r.get("latency")]
+    if not rows:
+        return None
+    uncached = [r for r in rows if r["latency"].get("synthesize") is not None
+                and not r["latency"].get("synth_cached")]
+    stages = ("rewrite", "retrieve", "rerank", "retrieval_total")
+    summary: dict = {
+        "unit": "ms",
+        # 检索侧与 LLM 无关（实测换模型完全一致），全部条目都算
+        "by_stage": {s: _quantiles([r["latency"].get(s) for r in rows]) for s in stages},
+        "synthesize": _quantiles([r["latency"].get("synthesize") for r in uncached]),
+        "synthesize_n_uncached": len(uncached),
+        "total": _quantiles([r["latency"].get("total") for r in rows]),
+        "by_type": {},
+        "n": len(rows),
+        "cached_answers": sum(1 for r in rows if r["latency"].get("synth_cached")),
+    }
+    summary["cache_contaminated"] = summary["cached_answers"] > 0
+    # 端到端是否达标：PLAN 目标 P95 ≤ 8s（用全量 total，含缓存命中的快条目）
+    e2e = summary["total"]
+    summary["target_p95_ms"] = 8000
+    summary["p95_meets_target"] = bool(e2e) and e2e.get("p95", 0) <= 8000
+    for t in sorted({r["type"] for r in rows}):
+        sub = [r for r in rows if r["type"] == t]
+        sub_uncached = [r for r in uncached if r["type"] == t]
+        summary["by_type"][t] = {
+            "n": len(sub),
+            "synthesize": _quantiles([r["latency"].get("synthesize") for r in sub_uncached]),
+            "total": _quantiles([r["latency"].get("total") for r in sub]),
+            # 答案长度是延迟的主因（实测），不报它就无法解释聚合题为何慢
+            "answer_chars_mean": round(
+                sum(len(r.get("answer") or "") for r in sub) / len(sub), 1
+            ),
+        }
+    return summary
 
 
 def _is_refusable(items: list[GoldItem], item_id: str) -> bool:

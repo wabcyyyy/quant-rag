@@ -6,6 +6,9 @@
 - 命中即返回，不发请求 → 同一批黄金集反复评估零成本
 - 换模型/prompt 会自然产生新键，不会误用旧答案
 - 关闭方式：环境变量 DOC_RAG_LLM_CACHE=0 或配置 llm.cache=false
+
+计时：`chat_timed` 返回每次调用的墙钟耗时 + `cached` 标志。缓存命中的耗时是
+一次本地查询，**不能当作模型延迟**——测延迟必须关缓存（PLAN「延迟口径」）。
 """
 
 from __future__ import annotations
@@ -118,6 +121,15 @@ def _cache_put(key: str, model: str, response: str) -> None:
             _STATS["cache_write_errors"] += 1
 
 
+def _timing(t0: float, cached: bool, model: str) -> dict:
+    """构造计时元数据。`cached=True` 时 ms 是本地 sqlite 查询耗时，不是模型延迟。"""
+    return {
+        "ms": round((time.perf_counter() - t0) * 1000, 1),
+        "cached": cached,
+        "model": model,
+    }
+
+
 def cache_stats() -> dict:
     """返回本次进程的命中统计 + 真实调用 token + 缓存故障 + 缓存总量（让成本与浪费可见）。"""
     total = 0
@@ -150,6 +162,22 @@ def chat(
     system_prompt: str | None = None,
     temperature: float | None = None,
 ) -> str:
+    return chat_timed(llm_cfg, user_prompt, system_prompt, temperature)[0]
+
+
+def chat_timed(
+    llm_cfg: dict,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+) -> tuple[str, dict]:
+    """同 `chat`，但返回 (文本, 计时元数据)。
+
+    计时口径（PLAN「延迟口径」）：`ms` 是这次调用的墙钟耗时，**缓存命中时它衡量的是
+    一次本地 sqlite 查询，不是模型延迟**——所以 `cached` 标志必须与耗时一起看，
+    否则缓存命中会把延迟低估到毫秒级（PLAN 里 1.3s 与 6.3s 的矛盾就是这类混淆）。
+    测真实延迟必须关缓存（`DOC_RAG_LLM_CACHE=0` / `--fresh-answers`）。
+    """
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -167,14 +195,20 @@ def chat(
     extra = llm_cfg.get("extra_body") or None
     if extra:
         kwargs["extra_body"] = extra
+    # 合成侧的思考开关（judge 走 eval.judge.reasoning_effort，见 eval/runner.py）。
+    # 推理型模型把输出预算大部分花在看不见的 reasoning token 上——这是聚合题
+    # 端到端延迟的主因（实测墙钟 25~34s），也是唯一有效的压延迟杠杆。
+    if llm_cfg.get("reasoning_effort"):
+        kwargs["reasoning_effort"] = llm_cfg["reasoning_effort"]
 
     use_cache = cache_enabled(llm_cfg)
     key = _cache_key(llm_cfg, messages, **kwargs)
+    t0 = time.perf_counter()
     if use_cache:
         cached = _cache_get(key)
         if cached is not None:
             _STATS["hit"] += 1
-            return cached
+            return cached, _timing(t0, cached=True, model=llm_cfg["model"])
     _STATS["miss"] += 1
 
     client = OpenAI(
@@ -187,6 +221,7 @@ def chat(
     )
     last_exc: Exception | None = None
     for attempt in range(_RETRIES):
+        t0 = time.perf_counter()  # 每轮重置：ms 只算最后一次成功尝试，不含退避等待
         try:
             resp = client.chat.completions.create(
                 model=llm_cfg["model"], messages=messages, **kwargs
@@ -213,5 +248,8 @@ def chat(
                 )
         if use_cache and content:
             _cache_put(key, llm_cfg["model"], content)
-        return content
+        meta = _timing(t0, cached=False, model=llm_cfg["model"])
+        meta["attempts"] = attempt + 1  # >1 说明发生过重试，耗时含退避等待
+        meta["reasoning_effort"] = kwargs.get("reasoning_effort")
+        return content, meta
     raise RuntimeError(f"LLM 调用失败（已重试 {_RETRIES} 次）：{last_exc}")

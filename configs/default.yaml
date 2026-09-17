@@ -25,6 +25,11 @@ llm:
   model: env:DOC_RAG_LLM_MODEL # judge 与合成同源（PLAN §5.3 评估可信度口径）
   temperature: 0.0
   cache: true # 本地响应缓存（.cache/llm_cache.sqlite）：同 prompt 重跑零成本
+  # 合成侧的思考开关。默认空 = 保持现状（开思考，质量优先）。
+  # 设 none 可砍掉推理型模型看不见的 reasoning token——实测它占输出 93%，
+  # 是聚合题端到端 25~34s 的主因（PLAN「延迟实测」）。**会改变答案，作废现有基线**。
+  # 空串是 falsy，不会进请求参数，所以默认行为与改动前逐字一致。
+  reasoning_effort: env:DOC_RAG_LLM_REASONING_EFFORT
   # OpenRouter 建议带归因头（可选）；换回 DeepSeek 官方时删掉本段
   headers:
     HTTP-Referer: https://github.com/wabcyyyy/quant-rag

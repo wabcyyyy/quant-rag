@@ -1,0 +1,300 @@
+"""延迟测量回归测试——全部离线（mock），不发任何真实 LLM/embedding 调用。
+
+守护对象是「数字可信」：延迟曾因「无测量代码 + 缓存命中混淆 + 无模型归属」
+而变成 PLAN 里两个互相矛盾的数（1.3s vs 5.3~7.4s）。这里锁住三件事：
+1. 缓存命中的耗时必须带 cached 标志（它不是模型延迟）；
+2. 分位数用最近秩法，小样本下不虚高；
+3. 汇总把合成分位数限制在未命中缓存的条目上，并置 cache_contaminated。
+"""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import Mock
+
+import pytest
+
+from doc_rag.eval import runner
+from doc_rag.eval.runner import _latency_summary, _quantiles
+from doc_rag.generate import llm as llm_mod
+
+# ---------------------------------------------------------------- _quantiles
+
+
+def test_quantiles_nearest_rank_on_small_sample():
+    """最近秩法：n=4 时 p50 取第 2 个、p95 取最大值（不做插值）。"""
+    q = _quantiles([1.0, 2.0, 3.0, 4.0])
+    assert q["n"] == 4
+    assert q["p50"] == 2.0
+    assert q["p95"] == 4.0
+    assert q["max"] == 4.0
+    assert q["min"] == 1.0
+
+
+def test_quantiles_ignores_none_and_handles_empty():
+    q = _quantiles([None, 10.0, None, 30.0])
+    assert q["n"] == 2
+    assert q["p50"] == 10.0
+    assert _quantiles([]) == {}
+    assert _quantiles([None]) == {}
+
+
+def test_quantiles_never_exceeds_max():
+    """插值实现会给出比任何真实请求都大的 p95；最近秩法必须落在样本内。"""
+    xs = [5.0, 100.0, 700.0, 12000.0]
+    q = _quantiles(xs)
+    assert q["p95"] <= max(xs)
+
+
+# ------------------------------------------------------- 缓存标志与计时口径
+
+
+def test_chat_timed_flags_cache_hit_and_reports_ms(monkeypatch):
+    """缓存命中必须带 cached=True —— 否则它的毫秒数会被当成模型延迟。"""
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: True)
+    monkeypatch.setattr(llm_mod, "_cache_get", lambda key: "缓存的答案")
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
+    text, meta = llm_mod.chat_timed(cfg, "问题")
+    assert text == "缓存的答案"
+    assert meta["cached"] is True
+    assert meta["model"] == "m"
+    assert meta["ms"] >= 0
+
+
+def test_chat_timed_flags_real_call_and_counts_attempts(monkeypatch):
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
+    usage = Mock(prompt_tokens=10, completion_tokens=5)
+    usage.completion_tokens_details = Mock(reasoning_tokens=1)
+    resp = Mock()
+    resp.choices = [Mock(message=Mock(content="真答案"))]
+    resp.usage = usage
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = Mock(completions=Mock(create=lambda **kw: resp))
+
+    monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
+    text, meta = llm_mod.chat_timed(cfg, "问题")
+    assert text == "真答案"
+    assert meta["cached"] is False
+    assert meta["attempts"] == 1
+
+
+def test_chat_still_returns_plain_text(monkeypatch):
+    """chat() 是既有调用点依赖的接口，必须仍返回 str。"""
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: True)
+    monkeypatch.setattr(llm_mod, "_cache_get", lambda key: "答案")
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
+    assert llm_mod.chat(cfg, "问题") == "答案"
+
+
+def test_reasoning_effort_reaches_request_kwargs(monkeypatch):
+    """合成侧的思考开关必须真的进请求参数（压聚合题延迟的唯一杠杆）。"""
+    seen: dict = {}
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            def _create(**kw):
+                seen.update(kw)
+                resp = Mock()
+                resp.choices = [Mock(message=Mock(content="x"))]
+                resp.usage = None
+                return resp
+
+            self.chat = Mock(completions=Mock(create=_create))
+
+    monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k",
+           "reasoning_effort": "none"}
+    llm_mod.chat(cfg, "问题")
+    assert seen.get("reasoning_effort") == "none"
+
+
+def test_no_reasoning_effort_key_when_unset(monkeypatch):
+    """默认（不配）不得凭空塞参数——那会改变现有基线行为。"""
+    seen: dict = {}
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            def _create(**kw):
+                seen.update(kw)
+                resp = Mock()
+                resp.choices = [Mock(message=Mock(content="x"))]
+                resp.usage = None
+                return resp
+
+            self.chat = Mock(completions=Mock(create=_create))
+
+    monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
+    llm_mod.chat({"model": "m", "base_url": "https://api.x.com", "api_key": "k"}, "问题")
+    assert "reasoning_effort" not in seen
+
+
+# ------------------------------------------------------------ 延迟汇总口径
+
+
+def _item(id_, type_, answer, synth_ms, cached, total_ms=None):
+    return {
+        "id": id_, "type": type_, "answer": answer,
+        "latency": {
+            "rewrite": 1.0, "retrieve": 200.0, "rerank": 50.0,
+            "retrieval_total": 251.0,
+            "synthesize": synth_ms, "synth_cached": cached,
+            "total": total_ms if total_ms is not None else (synth_ms or 0) + 251.0,
+        },
+    }
+
+
+def test_latency_summary_excludes_cached_from_synthesize_percentiles():
+    """缓存命中的合成耗时不得进入合成分位数——否则 LLM 延迟被拉到毫秒级。"""
+    rows = [
+        _item("q1", "fact", "短答案", 3000.0, False),
+        _item("q2", "fact", "短答案", 2.0, True),   # 缓存命中：2ms 不是延迟
+        _item("q3", "fact", "短答案", 4000.0, False),
+    ]
+    lat = _latency_summary(rows)
+    assert lat["synthesize_n_uncached"] == 2
+    assert lat["synthesize"]["n"] == 2
+    assert lat["synthesize"]["min"] == 3000.0
+    assert lat["cached_answers"] == 1
+    assert lat["cache_contaminated"] is True
+
+
+def test_latency_summary_clean_run_not_contaminated():
+    rows = [_item("q1", "fact", "答案", 3000.0, False)]
+    lat = _latency_summary(rows)
+    assert lat["cache_contaminated"] is False
+    assert lat["cached_answers"] == 0
+
+
+def test_latency_summary_by_type_exposes_the_tail():
+    """延迟是双峰的：聚合题（长答案）必须单独可见，不能被混合 P95 藏起来。"""
+    rows = [
+        _item("q1", "fact", "短", 2000.0, False),
+        _item("q2", "fact", "短", 2500.0, False),
+        _item("q3", "cross_doc", "长" * 600, 30000.0, False),
+    ]
+    lat = _latency_summary(rows)
+    assert lat["by_type"]["fact"]["synthesize"]["p95"] == 2500.0
+    assert lat["by_type"]["cross_doc"]["synthesize"]["p95"] == 30000.0
+    assert lat["by_type"]["cross_doc"]["answer_chars_mean"] == 600.0
+    assert lat["by_type"]["fact"]["answer_chars_mean"] == 1.0
+
+
+def test_latency_summary_target_verdict_tracks_p95():
+    fast = _latency_summary([_item("q1", "fact", "a", 1000.0, False)])
+    slow = _latency_summary([_item("q1", "cross_doc", "a", 30000.0, False)])
+    assert fast["p95_meets_target"] is True
+    assert slow["p95_meets_target"] is False
+    assert fast["target_p95_ms"] == 8000
+
+
+def test_latency_summary_empty_without_timing():
+    assert _latency_summary([]) is None
+    assert _latency_summary([{"id": "q1", "type": "fact"}]) is None
+
+
+# ------------------------------------------------- runner 端到端接线（离线）
+
+
+def test_evaluate_records_latency_and_self_documenting_meta(tmp_path, monkeypatch):
+    """evaluate 必须落盘分阶段延迟，并让 meta 自证模型与缓存开关。"""
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [{
+        "id": "q001", "type": "fact", "question": "费用？",
+        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
+    }]}), encoding="utf-8")
+
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
+    ]
+    synthesizer = Mock()
+    synthesizer.answer.return_value = "费用67元 [1]"
+    synthesizer.last_meta = {"ms": 1234.5, "cached": False, "model": "deepseek-flash"}
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+
+    cfg = {"retrieval": {}, "llm": {"model": "deepseek-flash", "cache": False}}
+    results = runner.evaluate(gold, cfg=cfg)
+
+    item = results["items"][0]
+    assert item["latency"]["synthesize"] == 1234.5
+    assert item["latency"]["synth_cached"] is False
+    assert item["latency"]["total"] is not None
+    lat = results["summary"]["latency"]
+    assert lat["synthesize"]["p95"] == 1234.5
+    assert lat["cache_contaminated"] is False
+    # 数字必须能追到「哪个模型、缓存开没开」
+    assert results["meta"]["llm_model"] == "deepseek-flash"
+    assert results["meta"]["answer_cache"] is False
+
+
+def test_evaluate_marks_contaminated_when_cache_hit(tmp_path, monkeypatch):
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [{
+        "id": "q001", "type": "fact", "question": "费用？",
+        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
+    }]}), encoding="utf-8")
+
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
+    ]
+    synthesizer = Mock()
+    synthesizer.answer.return_value = "费用67元 [1]"
+    synthesizer.last_meta = {"ms": 1.2, "cached": True, "model": "m"}
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+
+    cfg = {"retrieval": {}, "llm": {"model": "m", "cache": True}}
+    results = runner.evaluate(gold, cfg=cfg)
+    lat = results["summary"]["latency"]
+    assert lat["cache_contaminated"] is True
+    assert lat["synthesize"] == {}  # 唯一一条命中缓存 → 合成分位数无样本
+    assert results["meta"]["answer_cache"] is True
+
+
+def test_evaluate_without_answers_has_no_synthesize_timing(tmp_path, monkeypatch):
+    """检索模式不调 LLM：合成分位数应为空，但检索侧延迟照常记录。"""
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [{
+        "id": "q001", "type": "fact", "question": "费用？",
+        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
+    }]}), encoding="utf-8")
+
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
+    ]
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, Mock())))
+
+    cfg = {"retrieval": {}, "llm": {"model": "m"}}
+    results = runner.evaluate(gold, cfg=cfg, with_answers=False)
+    lat = results["summary"]["latency"]
+    assert lat["synthesize"] == {}
+    assert lat["by_stage"]["retrieval_total"]["n"] == 1
+    assert results["meta"]["answer_cache"] is None
+
+
+def test_synthesizer_last_meta_is_none_before_first_answer():
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    assert Synthesizer({"model": "m"}).last_meta is None
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_synthesizer_records_meta(monkeypatch, cached):
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    monkeypatch.setattr(
+        llm_mod, "chat_timed",
+        lambda *a, **k: ("答", {"ms": 42.0, "cached": cached, "model": "m"}),
+    )
+    syn = Synthesizer({"model": "m"})
+    assert syn.answer("q", [{"no": 1, "text": "t", "doc": "d", "page": 1}]) == "答"
+    assert syn.last_meta["cached"] is cached

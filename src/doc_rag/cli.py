@@ -14,6 +14,38 @@ from doc_rag.ingest import profile as corpus_profile
 app = typer.Typer(help="企业文档 RAG（飞书批量导出 PDF / doc(x) 双路）— 设计见 PLAN.md")
 
 
+def _fmt_q(q: dict | None) -> str:
+    if not q:
+        return "—"
+    return f"p50 {q.get('p50')} · p95 {q.get('p95')} · max {q.get('max')}（n={q.get('n')}）"
+
+
+def _print_latency(lat: dict | None) -> None:
+    """打印延迟摘要（PLAN「延迟口径」）：分阶段 + 分题型 + 缓存污染告警。"""
+    if not lat:
+        typer.echo("延迟            : —（本次为检索模式或未计时）")
+        return
+    by_stage = lat.get("by_stage") or {}
+    typer.echo(f"延迟检索侧      : 改写+检索+重排 {_fmt_q(by_stage.get('retrieval_total'))}")
+    typer.echo(f"延迟合成        : {_fmt_q(lat.get('synthesize'))}")
+    total = lat.get("total") or {}
+    mark = "✓ 达标" if lat.get("p95_meets_target") else "✗ 超目标"
+    typer.echo(
+        f"延迟端到端      : {_fmt_q(total)}  ← 目标 p95 ≤ {lat.get('target_p95_ms')}ms {mark}"
+    )
+    for t, row in (lat.get("by_type") or {}).items():
+        syn, tot = row.get("synthesize") or {}, row.get("total") or {}
+        typer.echo(
+            f"  {t:<16} n={row.get('n'):<3} 合成 p95 {syn.get('p95', '—')}ms · "
+            f"端到端 p95 {tot.get('p95', '—')}ms · 答案均长 {row.get('answer_chars_mean')} 字"
+        )
+    if lat.get("cache_contaminated"):
+        typer.echo(
+            f"  ⚠ 本轮有 {lat.get('cached_answers')} 条答案命中缓存：合成延迟被低估，"
+            "测真实延迟请加 --fresh-answers"
+        )
+
+
 @app.command()
 def check() -> None:
     """API 冒烟：LLM 连通 / Embedding 维度 / sparse 权重探测（PLAN §9 行动项 1）。"""
@@ -50,15 +82,19 @@ def check() -> None:
         reply = (msg.content or "").strip()
         reasoning = (getattr(msg, "reasoning", None) or "")
         if reply:
-            typer.echo(f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）回复：{reply!r}")
+            typer.echo(f"[LLM] {llm['model']} 连通 ✓（ping {dt:.1f}s）回复：{reply!r}")
         elif reasoning:
             typer.echo(
-                f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）但 content 为空、仅返回 reasoning "
+                f"[LLM] {llm['model']} 连通 ✓（ping {dt:.1f}s）但 content 为空、仅返回 reasoning "
                 f"（推理型模型 + token 预算不足）：{reasoning[:60]!r}"
             )
             typer.echo("      提示：正式调用需留足 max_tokens，或换非推理型模型")
         else:
-            typer.echo(f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）但返回空内容，请检查模型")
+            typer.echo(f"[LLM] {llm['model']} 连通 ✓（ping {dt:.1f}s）但返回空内容，请检查模型")
+        # 这个数曾被当成合成延迟写进 PLAN（1.3s），实际是无上下文、无 system prompt 的
+        # 单句 ping，与真实合成的量级差一个数量级。要测延迟用 eval 的延迟摘要。
+        typer.echo("      注：这是连通性 ping 延迟（无上下文、无 system prompt），≠ 合成延迟；")
+        typer.echo("          合成延迟见 `doc-rag eval` 的延迟摘要（需关缓存才准）")
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"[LLM] 失败：{exc}")
         raise typer.Exit(1) from exc
@@ -170,8 +206,11 @@ def query(
     top_n: Annotated[int | None, typer.Option(help="融合后取块数")] = None,
     no_rewrite: Annotated[bool, typer.Option(help="关闭查询改写（A/B 对照）")] = False,
     no_rerank: Annotated[bool, typer.Option(help="关闭重排（A/B 对照）")] = False,
+    timing: Annotated[bool, typer.Option(help="打印分阶段延迟（注意：命中缓存时合成耗时不是模型延迟）")] = False,
 ) -> None:
     """检索问答：改写 → Dense+BM25+RRF → 重排 → 强制引用合成。"""
+    import time
+
     from qdrant_client import QdrantClient
 
     from doc_rag.generate.synthesizer import Synthesizer
@@ -187,15 +226,18 @@ def query(
         collection=collection,
         retrieval_cfg=cfg["retrieval"],
     )
+    t_item = time.perf_counter()
     plan = {"rewritten": question, "filters": None, "aggregate": False, "top_n": None, "reason": "已关闭改写"}
     if not no_rewrite:
         plan = QueryRewriter(cfg["retrieval"]).rewrite(question)
+    t_rewrite = time.perf_counter()
     results = retriever.retrieve(
         plan["rewritten"],
         top_n=top_n or plan["top_n"],
         filters=plan["filters"],
         aggregate=plan["aggregate"],
     )
+    t_retrieve = time.perf_counter()
     if not results:
         typer.echo("（未检索到相关内容——先跑 doc-rag ingest）")
         raise typer.Exit(1)
@@ -206,6 +248,7 @@ def query(
             results = Reranker(cfg["rerank"]).rerank(plan["rewritten"], results)
         except Exception as exc:  # noqa: BLE001 重排失败退回融合顺序
             typer.echo(f"[重排失败，退回融合顺序] {exc}")
+    t_rerank = time.perf_counter()
     if not no_rewrite:
         typer.echo(f"[改写] {plan['reason']}\n")
 
@@ -223,11 +266,30 @@ def query(
         }
         for i, r in enumerate(results)
     ]
-    typer.echo(Synthesizer(cfg["llm"]).answer(question, contexts))
+    synthesizer = Synthesizer(cfg["llm"])
+    typer.echo(synthesizer.answer(question, contexts))
+    t_synth = time.perf_counter()
     typer.echo("\n—— 引用 ——")
     for c, r in zip(contexts, results):
         page = f" 第{c['page']}页" if c["page"] else ""
         typer.echo(f"[{c['no']}] {c['doc']}{page}（{r['block_type']}）")
+    if timing:
+        meta = synthesizer.last_meta or {}
+        cached = meta.get("cached")
+        typer.echo("\n—— 延迟 ——")
+        typer.echo(
+            f"改写 {(t_rewrite - t_item) * 1000:.0f}ms · "
+            f"检索 {(t_retrieve - t_rewrite) * 1000:.0f}ms · "
+            f"重排 {(t_rerank - t_retrieve) * 1000:.0f}ms"
+        )
+        if cached:
+            typer.echo(
+                f"合成 {meta.get('ms')}ms —— **缓存命中**，这不是模型延迟；"
+                "测真实延迟请设 DOC_RAG_LLM_CACHE=0"
+            )
+        else:
+            typer.echo(f"合成 {meta.get('ms')}ms（模型 {meta.get('model')}，真实调用）")
+        typer.echo(f"端到端 {(t_synth - t_item) * 1000:.0f}ms")
 
 
 @app.command("gen-gold")
@@ -274,6 +336,9 @@ def evaluate(
     fresh_judge: Annotated[
         bool, typer.Option(help="不复用 judge 缓存：测 judge 运行间随机性（会真实计费）")
     ] = False,
+    fresh_answers: Annotated[
+        bool, typer.Option(help="不复用合成缓存：测真实 LLM 延迟（缓存命中时毫秒级，不是延迟）")
+    ] = False,
     ragas_out: Annotated[
         Path | None, typer.Option(help="RAGAS 结果落盘路径（默认 <结果文件名>_ragas.json）")
     ] = None,
@@ -287,6 +352,14 @@ def evaluate(
     if fresh_judge and not (ragas or ragas_from is not None):
         typer.echo("--fresh-judge 只在启用 RAGAS（--ragas 或 --ragas-from）时有效")
         raise typer.Exit(1)
+
+    # 关合成缓存必须走环境变量：cache_enabled() 里环境变量优先于配置，
+    # 而这里要的是「本次进程不吃缓存」，不能改配置（会污染后续运行）
+    if fresh_answers:
+        import os
+
+        os.environ["DOC_RAG_LLM_CACHE"] = "0"
+        typer.echo("已关闭合成缓存（--fresh-answers）：本轮延迟为真实调用耗时，会真实计费\n")
 
     if ragas_from is not None:
         from doc_rag.eval.runner import ragas_from_results
@@ -335,6 +408,7 @@ def evaluate(
     typer.echo(f"引用存在率      : {s.get('citation_presence_rate')}")
     typer.echo(f"文档覆盖率      : {s['mean_doc_coverage']}")
     typer.echo(f"  分题型覆盖率  : {s['coverage_by_type']}")
+    _print_latency(s.get("latency"))
     if results.get("ragas"):
         typer.echo(f"RAGAS           : {results['ragas']}")
     from doc_rag.generate.llm import cache_stats
