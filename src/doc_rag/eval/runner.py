@@ -45,6 +45,18 @@ def _build_retriever(cfg: dict, collection: str | None) -> tuple[HybridRetriever
     return retriever, Synthesizer(cfg["llm"])
 
 
+def _maybe_rerank(cfg: dict, question: str, results: list[dict], use_rerank: bool) -> list[dict]:
+    """重排（PLAN §7 Phase 2）：削减上下文噪声，Faithfulness 的主要手段。"""
+    if not use_rerank or not results:
+        return results
+    from ..retrieve.rerank import Reranker
+
+    try:
+        return Reranker(cfg["rerank"]).rerank(question, results)
+    except Exception:  # noqa: BLE001 重排失败不阻塞（退回融合顺序）
+        return results
+
+
 def _refusal_ok(answer: str) -> bool:
     return any(marker in answer for marker in _REFUSAL_MARKERS)
 
@@ -67,6 +79,7 @@ def evaluate(
     mode: str | None = None,
     aggregate: bool = False,
     use_rewrite: bool = False,
+    use_rerank: bool = False,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -90,6 +103,7 @@ def evaluate(
             filters=plan["filters"],
             aggregate=plan["aggregate"] or aggregate,
         )
+        results = _maybe_rerank(cfg, plan["rewritten"], results, use_rerank)
         got_ids = [r["doc_id"] for r in results]
         hit_ranks = [got_ids.index(s) + 1 for s in item.source_doc_ids if s in got_ids]
         first_rank = min(hit_ranks) if hit_ranks else None
@@ -194,7 +208,8 @@ def evaluate(
             "collection": retriever.collection,
             "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
             + ("+aggregate" if aggregate else "")
-            + ("+rewrite" if use_rewrite else ""),
+            + ("+rewrite" if use_rewrite else "")
+            + ("+rerank" if use_rerank else ""),
             "with_answers": with_answers,
         },
         "summary": summary,

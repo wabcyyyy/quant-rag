@@ -39,6 +39,13 @@ retrieval:
   rerank_top_n: 6
   parent_expand: true
 
+rerank:
+  enabled: true
+  base_url: env:DOC_RAG_EMBEDDING_BASE_URL # SiliconFlow 同源
+  api_key: env:DOC_RAG_EMBEDDING_API_KEY
+  model: BAAI/bge-reranker-v2-m3
+  top_n: 6 # 重排后送进合成的块数（削减上下文噪声 → Faithfulness）
+
 metadata_extraction:
   enabled: true
   fields: [date, meeting_type, attendees, topics, decisions]

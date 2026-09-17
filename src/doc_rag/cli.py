@@ -143,8 +143,9 @@ def query(
     kb: Annotated[str | None, typer.Option(help="Qdrant collection 名")] = None,
     top_n: Annotated[int | None, typer.Option(help="融合后取块数")] = None,
     no_rewrite: Annotated[bool, typer.Option(help="关闭查询改写（A/B 对照）")] = False,
+    no_rerank: Annotated[bool, typer.Option(help="关闭重排（A/B 对照）")] = False,
 ) -> None:
-    """检索问答：改写 → Dense+BM25+RRF → 强制引用合成。"""
+    """检索问答：改写 → Dense+BM25+RRF → 重排 → 强制引用合成。"""
     from qdrant_client import QdrantClient
 
     from doc_rag.generate.synthesizer import Synthesizer
@@ -172,6 +173,13 @@ def query(
     if not results:
         typer.echo("（未检索到相关内容——先跑 doc-rag ingest）")
         raise typer.Exit(1)
+    if not no_rerank and cfg["rerank"].get("enabled"):
+        from doc_rag.retrieve.rerank import Reranker
+
+        try:
+            results = Reranker(cfg["rerank"]).rerank(plan["rewritten"], results)
+        except Exception as exc:  # noqa: BLE001 重排失败退回融合顺序
+            typer.echo(f"[重排失败，退回融合顺序] {exc}")
     if not no_rewrite:
         typer.echo(f"[改写] {plan['reason']}\n")
 
@@ -227,6 +235,7 @@ def evaluate(
     mode: Annotated[str | None, typer.Option(help="检索模式：hybrid（默认）/ dense（消融对照）")] = None,
     aggregate: Annotated[bool, typer.Option(help="聚合检索：大池取块后按文档去重（跨文档题）")] = False,
     rewrite: Annotated[bool, typer.Option(help="启用查询改写（测实际产品路径）")] = False,
+    rerank: Annotated[bool, typer.Option(help="启用重排（削减上下文噪声）")] = False,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -259,6 +268,7 @@ def evaluate(
         mode=mode,
         aggregate=aggregate,
         use_rewrite=rewrite,
+        use_rerank=rerank,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")
