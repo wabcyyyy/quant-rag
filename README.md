@@ -143,10 +143,11 @@ PDF 与 docx 归一到同一套 block 模型，下游分块/入库只认它，�
 > Faithfulness −6.4pt（p=0.0015）。
 >
 > **但分题型看，聚合题关思考是免费的**：包含匹配 1.00→1.00、Faithfulness 反而 0.936→0.979，
-> 延迟却从 24～32s 降到 2s。因此支持**分流**（`DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE=none`）：
-> 聚合题关思考、其余保思考——30s 级尾部消失、质量不变（模拟 p95 14.1s）；
-> 「P95 ≤ 8s」只有全关思考能达成，属产品取舍，默认保持质量优先。复现：
-> `uv run doc-rag eval --rewrite --rerank --fresh-answers`（`--fresh-answers` 必须加——
+> 延迟却从 24～32s 降到 2s。**已启用分流**（`DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE=none`，
+> 2026-09-18 拍板）：聚合题关思考、其余保思考——实测聚合题端到端均值 **27.7s → 2.7s（10.3×）**、
+> max 3.7s，13/13 包含匹配不变、Faithfulness 0.961/0.967（噪声内）。延迟目标相应改写为
+> **分题型 SLO**（聚合 ≤5s ✓ / 短答 ≤8s——短答题的思考尾部是已拍板的质量取舍）。
+> 复现：`uv run doc-rag eval --rewrite --rerank --fresh-answers`（`--fresh-answers` 必须加——
 > 缓存命中的毫秒数是本地查询耗时，不是模型延迟）。
 
 > **Faithfulness 的 0.77 是度量 bug，已修正**：judge 拿到的上下文缺了 `（文档名 第p页）` 前缀，
@@ -203,7 +204,8 @@ $ uv run doc-rag query "公司关于碳排放配额的管理制度是什么？"
 
 ## 已知不足与下一步
 
-- **P95 不达标**（32.8s vs 8s）：分流方案已实现待拍板；「8s 硬指标 vs 质量优先」是产品决策。
+- **延迟目标已改为分题型 SLO**（聚合 ≤5s 实测 3.7s ✓ / 短答 ≤8s）：分流已启用（2026-09-18），
+  30s 级尾部消除；短答题冷缓存下的思考尾部（实测最大 15.5s）是有意保留的质量取舍。
   归因已闭环：合成耗时与思考 token 逐条相关 **0.996**，慢条目（>8s）平均思考 5,389 token（快条目 498）。
 - **Answer Relevancy 0.39**：复测+人工归因（2026-09-18）确认不是中文噪声——指标把
   正确拒答与忠实的「未决」表述判为 noncommittal 记 0 分（open_discussion 题型整体 0.00），
