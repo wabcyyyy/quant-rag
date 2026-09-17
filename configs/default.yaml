@@ -24,6 +24,10 @@ llm:
   api_key: env:DOC_RAG_LLM_API_KEY
   model: env:DOC_RAG_LLM_MODEL # judge 与合成同源（PLAN §5.3 评估可信度口径）
   temperature: 0.0
+  # OpenRouter 建议带归因头（可选）；换回 DeepSeek 官方时删掉本段
+  headers:
+    HTTP-Referer: https://github.com/wabcyyyy/quant-rag
+    X-Title: doc-rag
 
 qdrant:
   url: http://localhost:6333
