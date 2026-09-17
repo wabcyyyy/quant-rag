@@ -267,7 +267,7 @@ def query(
         for i, r in enumerate(results)
     ]
     synthesizer = Synthesizer(cfg["llm"])
-    typer.echo(synthesizer.answer(question, contexts))
+    typer.echo(synthesizer.answer(question, contexts, aggregate=plan["aggregate"]))
     t_synth = time.perf_counter()
     typer.echo("\n—— 引用 ——")
     for c, r in zip(contexts, results):

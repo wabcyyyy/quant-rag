@@ -1,5 +1,7 @@
 """Prompt 模板（PLAN §5.1 元数据抽取 / §5.2 引用合成 / §5.3 决议-讨论区分）。"""
 
+import hashlib
+
 SYSTEM_ANSWER = """\
 你是企业文档问答助手。仅依据下方编号上下文回答，规则：
 1. 每一句事实陈述都必须在句末标注来源编号，格式为 [1] 或 [1][2]。没有编号的事实陈述视为无效。
@@ -49,6 +51,17 @@ def format_context(chunks: list[dict]) -> str:
         loc = f"（{c['doc']}" + (f" 第{c['page']}页" if c.get("page") else "") + "）"
         parts.append(f"[{c['no']}] {loc}\n{c['text']}")
     return "\n\n".join(parts)
+
+
+def fingerprint() -> str:
+    """合成 prompt 的版本指纹（前 12 位十六进制）。
+
+    动机：结果文件的 meta 此前只记检索参数不记 prompt 版本，导致「三组对照」的
+    基线/收紧两组答案事后无法归属（哪组用了哪个版本的 prompt 靠猜）——表里的
+    结论因而不敢再用。prompt 任何一字改动都会换指纹，答案从此自证出处。
+    """
+    blob = f"{SYSTEM_ANSWER}\x00{SYSTEM_ANSWER_NO_CITE}\x00{USER_ANSWER}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
 METADATA_EXTRACTION = """\

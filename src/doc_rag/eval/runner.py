@@ -198,7 +198,12 @@ def evaluate(
         )
         synth_meta: dict | None = None
         if with_answers:
-            answer = synthesizer.answer(item.question, ctx, require_citation=require_citation)
+            answer = synthesizer.answer(
+                item.question,
+                ctx,
+                require_citation=require_citation,
+                aggregate=bool(plan.get("aggregate") or aggregate),
+            )
             # 计时从 Synthesizer 实例上取：answer() 的返回类型保持不变，
             # 现有调用点与测试（Mock synthesizer）都不用改。
             # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta。
@@ -340,6 +345,9 @@ def evaluate(
             # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
             "llm_model": (cfg.get("llm") or {}).get("model"),
             "answer_cache": cache_enabled(cfg.get("llm") or {}) if with_answers else None,
+            # prompt 指纹：三组对照的基线/收紧两组答案曾因 meta 不记 prompt 版本
+            # 而无法归属（哪组用了哪个 prompt 靠猜），结论只能整体作废
+            "prompt_fingerprint": prompts.fingerprint() if with_answers else None,
         },
         "summary": summary,
         "ragas": ragas_summary,

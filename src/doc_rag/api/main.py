@@ -72,7 +72,7 @@ def query(body: QueryIn) -> dict:
         }
         for i, r in enumerate(results)
     ]
-    answer = synthesizer.answer(body.question, contexts)
+    answer = synthesizer.answer(body.question, contexts, aggregate=plan["aggregate"])
     t_synth = time.perf_counter()
     synth_meta = synthesizer.last_meta or {}
     return {

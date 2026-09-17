@@ -298,3 +298,125 @@ def test_synthesizer_records_meta(monkeypatch, cached):
     syn = Synthesizer({"model": "m"})
     assert syn.answer("q", [{"no": 1, "text": "t", "doc": "d", "page": 1}]) == "答"
     assert syn.last_meta["cached"] is cached
+
+
+# ------------------------------------------------------- 聚合题思考分流开关
+
+
+def _capture_cfg(monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(
+        llm_mod, "chat_timed",
+        lambda cfg, *a, **k: (seen.append(dict(cfg)), "答",
+                              {"ms": 1.0, "cached": False, "model": cfg["model"]})[1:],
+    )
+    return seen
+
+
+def test_aggregate_uses_dedicated_effort_when_configured(monkeypatch):
+    """配置了聚合档时，聚合题用它、普通题仍走全局——分流的核心语义。"""
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    seen = _capture_cfg(monkeypatch)
+    syn = Synthesizer({"model": "m", "reasoning_effort": "",
+                       "reasoning_effort_aggregate": "none"})
+    ctx = [{"no": 1, "text": "t", "doc": "d", "page": 1}]
+    syn.answer("普通题", ctx)
+    syn.answer("聚合题", ctx, aggregate=True)
+    assert not seen[0].get("reasoning_effort")         # 普通题：全局空 = 不会进请求参数
+    assert seen[1]["reasoning_effort"] == "none"       # 聚合题：走专用档
+
+
+def test_aggregate_falls_back_to_global_when_unset(monkeypatch):
+    """未配聚合档时回落全局值——默认行为与不开关逐字一致。"""
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    seen = _capture_cfg(monkeypatch)
+    syn = Synthesizer({"model": "m", "reasoning_effort": "none"})
+    syn.answer("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True)
+    assert seen[0]["reasoning_effort"] == "none"
+
+
+def test_aggregate_unset_means_no_override(monkeypatch):
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    seen = _capture_cfg(monkeypatch)
+    syn = Synthesizer({"model": "m", "reasoning_effort": ""})
+    syn.answer("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True)
+    assert not seen[0].get("reasoning_effort")  # 空=不进请求参数，与未配置等价
+
+
+def test_original_llm_cfg_not_mutated(monkeypatch):
+    """分流只影响本次调用：Synthesizer 的配置对象不得被原地改写。"""
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    _capture_cfg(monkeypatch)
+    cfg = {"model": "m", "reasoning_effort_aggregate": "none"}
+    syn = Synthesizer(cfg)
+    syn.answer("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True)
+    assert "reasoning_effort" not in cfg
+
+
+def test_runner_passes_aggregate_flag_to_synthesizer(tmp_path, monkeypatch):
+    """runner 必须把聚合标志传下去，否则分流在评估路径上不生效。"""
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [{
+        "id": "q001", "type": "cross_doc", "question": "关于X做过哪些决定？",
+        "expected_answer": "", "source_doc_ids": ["d1"], "must_contain": [],
+    }]}), encoding="utf-8")
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "t", "page": 1, "text": "正文", "block_type": "p"}
+    ]
+    syn = Mock()
+    syn.answer.return_value = "答案"
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, syn)))
+    monkeypatch.setattr(runner, "_maybe_rerank", lambda cfg, q, r, use: r)
+
+    results = runner.evaluate(
+        gold, cfg={"retrieval": {}, "llm": {"model": "m"}}, aggregate=True
+    )
+    assert results["items"][0]["answer"] == "答案"
+    assert syn.answer.call_args.kwargs.get("aggregate") is True
+
+
+# ------------------------------------------------------- prompt 版本指纹
+
+
+def test_prompt_fingerprint_changes_with_prompt_text():
+    """prompt 任何一字改动都必须换指纹——答案归属的根子。"""
+    from doc_rag.generate import prompts
+
+    fp1 = prompts.fingerprint()
+    original = prompts.USER_ANSWER
+    try:
+        prompts.USER_ANSWER = original + "\n"
+        assert prompts.fingerprint() != fp1
+    finally:
+        prompts.USER_ANSWER = original
+    assert prompts.fingerprint() == fp1
+
+
+def test_evaluate_meta_records_prompt_fingerprint(tmp_path, monkeypatch):
+    from doc_rag.generate import prompts
+
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [{
+        "id": "q001", "type": "fact", "question": "费用？",
+        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
+    }]}), encoding="utf-8")
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "t", "page": 1, "text": "费用67元", "block_type": "p"}
+    ]
+    synthesizer = Mock()
+    synthesizer.answer.return_value = "费用67元 [1]"
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+
+    results = runner.evaluate(gold, cfg={"retrieval": {}, "llm": {"model": "m"}})
+    assert results["meta"]["prompt_fingerprint"] == prompts.fingerprint()
+    # 检索模式没有答案，prompt 指纹无意义
+    results2 = runner.evaluate(
+        gold, cfg={"retrieval": {}, "llm": {"model": "m"}}, with_answers=False
+    )
+    assert results2["meta"]["prompt_fingerprint"] is None

@@ -30,6 +30,12 @@ llm:
   # 是聚合题端到端 25~34s 的主因（PLAN「延迟实测」）。**会改变答案，作废现有基线**。
   # 空串是 falsy，不会进请求参数，所以默认行为与改动前逐字一致。
   reasoning_effort: env:DOC_RAG_LLM_REASONING_EFFORT
+  # 聚合题专用档：cross_doc/time_filter 关思考实测两项指标都无损失
+  # （包含匹配 1.00→1.00、Faithfulness 0.936→0.979 / 1.00→0.975，n=13），
+  # 而端到端 24~32s → 2s——全项目性价比最高的延迟交易；其余题型关思考
+  # 忠实度 −6~−21pt，必须保留思考。不配则回落到上面的全局值。
+  # 推荐组合：全局留空（其余题型保质量）+ 此处设 none（聚合题砍 30s 级尾部）。
+  reasoning_effort_aggregate: env:DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE
   # OpenRouter 建议带归因头（可选）；换回 DeepSeek 官方时删掉本段
   headers:
     HTTP-Referer: https://github.com/wabcyyyy/quant-rag

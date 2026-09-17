@@ -67,9 +67,14 @@ term 0.83 · time_filter 1.00 · cross_doc 1.00
 > ——短答题 2～3s，聚合题 24～33s，报单一均值会同时低估前者、藏起后者。根因是
 > deepseek-flash 的输出里 **91% 是看不见的 reasoning token**，聚合题要跨 15～25 块归纳，
 > 思考量随之爆炸。**压延迟的唯一有效杠杆是关掉合成侧思考**（`DOC_RAG_LLM_REASONING_EFFORT=none`）：
-> 端到端 p95 32.8s → **2.6s（达标）**、成本 −94%，代价是包含匹配 −10.9pt（p=0.031），
-> 损失集中在 decision/open_discussion 这类需要归纳的题。属产品取舍，默认保持质量优先。
-> 复现：`uv run doc-rag eval --rewrite --rerank --fresh-answers`（`--fresh-answers` 必须加——
+> 端到端 p95 32.8s → **2.6s（达标）**、成本 −94%，代价是包含匹配 −10.9pt（p=0.031）、
+> Faithfulness −6.4pt（p=0.0015），损失集中在 decision/open_discussion 这类需要归纳的题。
+>
+> **但分题型看，聚合题关思考是免费的**：包含匹配 1.00→1.00、Faithfulness 反而 0.936→0.979，
+> 延迟却从 24～32s 降到 2s。因此支持**分流**（`DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE=none`）：
+> 聚合题关思考、其余保思考——30s 级尾部消失、质量不变（模拟 p95 14.1s）；
+> 「P95 ≤ 8s」只有全关思考能达成，属产品取舍，默认保持质量优先。复现：
+> `uv run doc-rag eval --rewrite --rerank --fresh-answers`（`--fresh-answers` 必须加——
 > 缓存命中的毫秒数是本地查询耗时，不是模型延迟）。
 
 > **Faithfulness 的 0.77 是度量 bug，已修正**：judge 拿到的上下文缺了 `（文档名 第p页）` 前缀，
