@@ -28,6 +28,38 @@ USER_ANSWER = """\
 """
 
 
+# 收紧前的合成 prompt（f90a717 之前的线上版本，逐字取自 git 历史）。
+# 保留为显式变量：让「基线 prompt vs 收紧 prompt」成为可复现的实验条件——
+# 三组对照当年就死在结果 meta 不记 prompt 版本、答案出处只能靠猜上（PLAN §5.3）。
+_BASELINE_ANSWER = """\
+你是企业文档问答助手。仅依据下方编号上下文回答，规则：
+1. 每个事实陈述必须标注来源编号，如 [1][2]；不得使用上下文之外的知识。
+2. 严格区分「会上决定」与「会上讨论过但未决定」——按原文措辞引用，不得把讨论升级为决议。
+3. 上下文不足以回答时，明确回答"根据现有文档无法回答"，并说明缺少什么信息。
+4. 涉及日期、参会人、数值、文号时逐字引用原文。
+"""
+
+# 合成 system prompt 的版本注册表。SYSTEM_ANSWER（上方）保持指向收紧版，
+# 所有直接引用它的既有调用点行为不变；按版本选 prompt 走 resolve_system_answer()。
+ANSWER_PROMPTS: dict[str, str] = {"tightened": SYSTEM_ANSWER, "baseline": _BASELINE_ANSWER}
+
+DEFAULT_PROMPT_VERSION = "tightened"
+
+
+def resolve_system_answer(
+    require_citation: bool = True, prompt_version: str | None = None
+) -> str:
+    """按版本取合成 system prompt。缺省 = tightened：现有行为逐字不变。
+
+    `require_citation=False`（消融 #4 对照组）历来只在收紧版下运行，
+    不随版本切换——baseline 历史上没有无引用变体。
+    """
+    version = prompt_version or DEFAULT_PROMPT_VERSION
+    if version not in ANSWER_PROMPTS:
+        raise KeyError(f"未知 prompt 版本：{version!r}（可选：{sorted(ANSWER_PROMPTS)}）")
+    return ANSWER_PROMPTS[version] if require_citation else SYSTEM_ANSWER_NO_CITE
+
+
 SYSTEM_ANSWER_NO_CITE = """\
 你是企业文档问答助手。仅依据下方上下文回答，规则：
 1. 回答不必标注来源编号，直接陈述结论即可。
@@ -53,14 +85,19 @@ def format_context(chunks: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def fingerprint() -> str:
+def fingerprint(prompt_version: str | None = None) -> str:
     """合成 prompt 的版本指纹（前 12 位十六进制）。
 
     动机：结果文件的 meta 此前只记检索参数不记 prompt 版本，导致「三组对照」的
     基线/收紧两组答案事后无法归属（哪组用了哪个版本的 prompt 靠猜）——表里的
     结论因而不敢再用。prompt 任何一字改动都会换指纹，答案从此自证出处。
+    对**当前生效的 system prompt** 哈希：baseline 与 tightened 两个版本的
+    指纹必须不同，否则 meta 里的指纹区分不了两组答案。
     """
-    blob = f"{SYSTEM_ANSWER}\x00{SYSTEM_ANSWER_NO_CITE}\x00{USER_ANSWER}"
+    blob = (
+        f"{resolve_system_answer(True, prompt_version)}"
+        f"\x00{SYSTEM_ANSWER_NO_CITE}\x00{USER_ANSWER}"
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 

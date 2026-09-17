@@ -214,7 +214,12 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
 
 
 def _time_items(docs: list[dict]) -> list[GoldItem]:
-    """时间限定题：年份 × 该年内 2~15 篇含名的人名（答案集完整、范围聚焦）。"""
+    """时间限定题：年份 × 该年内 2~40 篇含名的人名（答案集完整、范围聚焦）。
+
+    v2 放宽（黄金集补题）：答案集上限 15→40、每年 ≤4→≤6 条、总量 8→12——
+    v1 只有 5 条（n<20 时 p95 基本等于 max，延迟与覆盖率数字置信度弱）。
+    全部为程序化构造，零 LLM 成本。
+    """
     by_year: dict[str, list[dict]] = {}
     for d in docs:
         m = re.search(r"20\d{2}", d["title"])
@@ -229,10 +234,10 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
         scored: list[tuple[str, list[str]]] = []
         for name in names:
             src = _docs_containing(pool, name)
-            if 2 <= len(src) <= 15:
+            if 2 <= len(src) <= 40:
                 scored.append((name, src))
         scored.sort(key=lambda kv: -len(kv[1]))
-        for name, src in scored[:4]:
+        for name, src in scored[:6]:
             items.append(
                 GoldItem(
                     id="", type="time_filter",
@@ -243,8 +248,106 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
                     refusable=False, source_title=f"({year})",
                 )
             )
-            if len(items) >= 8:
+            if len(items) >= 12:
                 return items
+    return items
+
+
+# 零宽字符：飞书导出正文里大量出现（\u200b 等），不清洗会破坏 must_contain 的
+# 逐字 grounding 校验与后续的包含匹配判分
+_ZERO_WIDTH = str.maketrans("", "", "\u200b\u200c\u200d\ufeff")
+
+# 决议区的模板占位（不是真决议）
+_DECISION_PLACEHOLDERS = {"无", "暂无", "待定", "讨论结果", "（讨论结果）", "无决议", "见下"}
+
+# 决议线索词：真决议几乎必含其一（人工核对全库 20 个候选后定的白名单，
+# 精确优先——讨论备注/评审意见混进来会污染 decision 题型）
+_DECISION_CUE = re.compile(
+    r"通过|否决|否掉|同意|决定|暂定|定为|取消|成立|采用|选用|任命|不予|维持|列入|保留"
+    r"|试行|必开|改为|更名|下发|生效|按.{1,12}执行"
+)
+
+# 疑似「未决」措辞：这些是讨论状态而非决议（决议/讨论区分正是该题型的考点）
+_DECISION_HEDGE = re.compile(r"待讨论|待周会|待定|再议|尚未|未形成|下次会议|\?|？")
+
+
+def _clean_text(s: str) -> str:
+    return s.translate(_ZERO_WIDTH).strip()
+
+
+def _decision_candidates(d: dict) -> list[str]:
+    """一个文档里所有「决议区」块的候选决议句（决议区 → 投票区/附议区之间的首行实文）。"""
+    out = []
+    text = d["text"]
+    for m in re.finditer("决议区", text):
+        after = text[m.end():]
+        stop = len(after)
+        for marker in ("投票区", "附议区"):
+            p = after.find(marker)
+            if 0 <= p < stop:
+                stop = p
+        lines = [_clean_text(x) for x in after[:stop].split("\n")]
+        dec = next(
+            (
+                ln for ln in lines
+                if len(ln) >= 10 and ln not in _DECISION_PLACEHOLDERS and "|" not in ln
+            ),
+            None,
+        )
+        if dec:
+            out.append(dec)
+    return out
+
+
+def _decision_items(docs: list[dict]) -> list[GoldItem]:
+    """程序化决议题（v2 补题）：从「决议区」结构块提取决议原文，零 LLM 成本。
+
+    背景：v1 的 decision 题全部由 LLM 从 24 篇采样文档生成（8 条），已知弱点是
+    n 太小。本构造器绕开 LLM：决议内容在该语料里有固定结构位（「决议区」块），
+    决议原文本身就是 expected_answer，must_contain 从决议句逐字摘取（grounding
+    由构造保证）。质量过滤从严（人工核对过全库候选）：必须有决议线索词，
+    排除未决措辞、疑问模板句与评估类文档（其「决议区」是评审意见不是决议）；
+    全库仅 2 条通过——decision v2 = 8（LLM 原题）+ 2（程序化）= 10。
+    同一来源文档允许多题（v2 放宽）。
+    """
+    items: list[GoldItem] = []
+    seen_sentences: set[str] = set()
+    for d in docs:
+        title = _clean_text(d["title"])
+        if "-" not in title or "评估" in title:
+            continue
+        topic = _clean_text(title.rsplit("-", 1)[-1])
+        if len(topic) < 3:
+            continue
+        for decision in _decision_candidates(d):
+            if decision in seen_sentences:
+                continue
+            if _DECISION_HEDGE.search(decision) or not _DECISION_CUE.search(decision):
+                continue
+            # must_contain：决议句里最长的 2~3 个逗号/分号分隔段（逐字、长度 ≥4 才有判分区分度）
+            parts = sorted(
+                (p for p in re.split(r"[，。；：,;、！？\s]", decision) if len(p) >= 4),
+                key=len,
+                reverse=True,
+            )
+            must = parts[:3]
+            if len(must) < 2:
+                continue
+            seen_sentences.add(decision)
+            items.append(
+                GoldItem(
+                    id="", type="decision",
+                    question=f"在《{title}》关于「{topic}」的讨论中，会议最终形成了什么决议？",
+                    expected_answer=decision,
+                    must_contain=must,
+                    source_doc_ids=[d["doc_id"]], refusable=False,
+                    source_title=title,
+                    origin="programmatic_decision",
+                )
+            )
+            break  # 每个文档最多贡献 1 题
+        if len(items) >= 6:
+            break
     return items
 
 
@@ -287,11 +390,14 @@ def generate(
 
     programmatic_only=True：保留已有 LLM 题，只重算程序化题型（cross_doc /
     time_filter / no_answer）——改选词策略时零 LLM 成本（见 PLAN §8 成本控制）。
+    v2 增量：该模式下额外用程序化决议题（决议区结构提取）补 decision 的 n
+    （v1 仅 8 条，已知弱点）；全量 LLM 重生成路径行为不变（基线保护）。
     """
     docs = _load_docs(parsed_dir)
     sampled = _sample(docs, per_doc, seed)
 
     kept: list[GoldItem] = []
+    programmatic_decisions: list[GoldItem] = []
     if programmatic_only:
         if not out_file.exists():
             raise FileNotFoundError(f"programmatic_only 需要已有黄金集：{out_file}")
@@ -300,10 +406,12 @@ def generate(
         kept = [
             GoldItem.model_validate(i)
             for i in existing["items"]
-            if i["type"] not in _PROGRAMMATIC
+            if i["type"] not in _PROGRAMMATIC and i.get("origin") != "programmatic_decision"
         ]
+        programmatic_decisions = _decision_items(docs)
 
     items: list[GoldItem] = list(kept)
+    items.extend(programmatic_decisions)
     if not programmatic_only:
         for i, doc in enumerate(sampled):
             qtype = _PER_DOC_TYPES[i % len(_PER_DOC_TYPES)]
@@ -325,15 +433,21 @@ def generate(
         final.append(item)
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "meta": {
-            "seed": seed,
-            "corpus_docs": len(docs),
-            "sampled_docs": len(sampled),
-            "count": len(final),
-            "type_distribution": dict(Counter(i.type for i in final)),
-        },
-        "items": [i.model_dump() for i in final],
+    meta_out = {
+        "seed": seed,
+        "corpus_docs": len(docs),
+        "sampled_docs": len(sampled),
+        "count": len(final),
+        "type_distribution": dict(Counter(i.type for i in final)),
     }
+    if programmatic_only:
+        # v2 口径自证：time_filter 答案集上限 15→40、每年 ≤6 条；decision 增加决议区
+        # 程序化构造题（LLM 原题原样保留）。与 v1 数字并列时必须带上本口径。
+        meta_out["gold_version"] = "v2"
+        meta_out["v2_note"] = (
+            "time_filter 答案集上限 15→40、每年≤6条（总量≤12）；"
+            "decision 增加程序化构造（决议区提取，零 LLM）；LLM 生成题原样保留"
+        )
+    payload = {"meta": meta_out, "items": [i.model_dump() for i in final]}
     out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return payload["meta"]
+    return meta_out

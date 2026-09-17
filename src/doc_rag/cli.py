@@ -206,6 +206,7 @@ def query(
     top_n: Annotated[int | None, typer.Option(help="融合后取块数")] = None,
     no_rewrite: Annotated[bool, typer.Option(help="关闭查询改写（A/B 对照）")] = False,
     no_rerank: Annotated[bool, typer.Option(help="关闭重排（A/B 对照）")] = False,
+    stream: Annotated[bool, typer.Option(help="流式输出：答案边生成边打印（体感延迟方案）")] = False,
     timing: Annotated[bool, typer.Option(help="打印分阶段延迟（注意：命中缓存时合成耗时不是模型延迟）")] = False,
 ) -> None:
     """检索问答：改写 → Dense+BM25+RRF → 重排 → 强制引用合成。"""
@@ -267,7 +268,15 @@ def query(
         for i, r in enumerate(results)
     ]
     synthesizer = Synthesizer(cfg["llm"])
-    typer.echo(synthesizer.answer(question, contexts, aggregate=plan["aggregate"]))
+    if stream:
+        import sys
+
+        for piece in synthesizer.answer_stream(question, contexts, aggregate=plan["aggregate"]):
+            typer.echo(piece, nl=False)
+            sys.stdout.flush()  # 终端行缓冲会攒字，流式必须逐段显式刷
+        typer.echo("\n")
+    else:
+        typer.echo(synthesizer.answer(question, contexts, aggregate=plan["aggregate"]))
     t_synth = time.perf_counter()
     typer.echo("\n—— 引用 ——")
     for c, r in zip(contexts, results):
@@ -342,12 +351,27 @@ def evaluate(
     ragas_out: Annotated[
         Path | None, typer.Option(help="RAGAS 结果落盘路径（默认 <结果文件名>_ragas.json）")
     ] = None,
+    prompt_version: Annotated[
+        str | None,
+        typer.Option(help="合成 prompt 版本：tightened（默认）/ baseline（收紧前，消融对照）"),
+    ] = None,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
     from datetime import datetime
 
+    from doc_rag.generate import prompts
+
     cfg = load_config()
+
+    if prompt_version:
+        if prompt_version not in prompts.ANSWER_PROMPTS:
+            typer.echo(
+                f"未知 prompt 版本：{prompt_version}（可选：{sorted(prompts.ANSWER_PROMPTS)}）"
+            )
+            raise typer.Exit(1)
+        cfg["llm"]["prompt_version"] = prompt_version
+        typer.echo(f"合成 prompt 版本：{prompt_version}（指纹 {prompts.fingerprint(prompt_version)}）\n")
 
     if fresh_judge and not (ragas or ragas_from is not None):
         typer.echo("--fresh-judge 只在启用 RAGAS（--ragas 或 --ragas-from）时有效")
@@ -402,6 +426,7 @@ def evaluate(
     typer.echo(f"Recall@5        : {s['recall_at_5']}")
     typer.echo(f"Recall@{top_n}       : {s.get(f'recall_at_{top_n}')}")
     typer.echo(f"MRR             : {s['mrr']}")
+    typer.echo(f"nDCG@8          : {s.get('ndcg_at_8')}")
     typer.echo(f"包含匹配准确率   : {s['contains_acc']}")
     typer.echo(f"拒答正确率      : {s['refusal_acc']}")
     typer.echo(f"引用有效率      : {s['citation_valid_rate']}")
@@ -427,7 +452,10 @@ def evaluate(
 
     out_dir = Path(cfg["paths"]["eval"])
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    # --ragas-out 同时给直跑路径用：三组对照（T4）要求每组结果落在指定文件名上，
+    # 时间戳文件名无法预先写进 compare-ragas 的命令行
+    out_file = ragas_out or out_dir / f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     typer.echo(f"明细已写入 {out_file}")
 
@@ -552,3 +580,25 @@ def serve(
     import uvicorn
 
     uvicorn.run("doc_rag.api.main:app", host=host, port=port)
+
+
+@app.command()
+def demo(
+    kb: Annotated[str | None, typer.Option(help="Qdrant collection 名")] = None,
+    host: Annotated[str, typer.Option()] = "127.0.0.1",
+    port: Annotated[int, typer.Option()] = 7860,
+) -> None:
+    """Gradio 演示页（T8）：上传问答 / 引用 / 延迟面板。需 demo extra：uv sync --extra demo。"""
+    try:
+        import gradio
+    except ImportError:
+        typer.echo("gradio 未安装（demo extra）：uv sync --extra demo 后重试")
+        raise typer.Exit(1)
+
+    import doc_rag.api.demo as demo_mod
+
+    if kb:
+        # build_ui 内部用 _pipeline() 的单例；kb 覆盖借道环境上先建 pipeline 再改 collection
+        _, retriever, _ = demo_mod._pipeline()
+        retriever.collection = kb
+    demo_mod.build_ui(gradio).launch(server_name=host, server_port=port)

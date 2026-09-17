@@ -27,10 +27,13 @@ class Synthesizer:
         实测聚合题关思考包含匹配不降（1.00→1.00）而端到端 24~32s → 2s（PLAN「延迟实测」），
         是唯一「免费」的延迟收益；其余题型关思考 −8~−25pt，仍走全局 `llm.reasoning_effort`。
         未配置聚合档时回落到全局值（默认行为与不开关完全一致）。
+        prompt 版本：`llm.prompt_version` 缺省 = tightened（行为逐字不变）；
+        设 baseline 切回收紧前的 system prompt（三组对照的实验变量，PLAN §5.3）。
         计时见 `last_meta`：`cached=True` 时它的 ms 是本地缓存查询耗时，**不是模型延迟**，
         测真实延迟必须关缓存（`DOC_RAG_LLM_CACHE=0`）。
         """
-        system = prompts.SYSTEM_ANSWER if require_citation else prompts.SYSTEM_ANSWER_NO_CITE
+        version = self.llm_cfg.get("prompt_version")
+        system = prompts.resolve_system_answer(require_citation, version)
         llm_cfg = self.llm_cfg
         if aggregate:
             agg_effort = llm_cfg.get("reasoning_effort_aggregate")
@@ -45,3 +48,37 @@ class Synthesizer:
         )
         self.last_meta = meta
         return text
+
+    def answer_stream(
+        self,
+        question: str,
+        chunks: list[dict],
+        require_citation: bool = True,
+        aggregate: bool | None = None,
+    ):
+        """流式回答：逐段 yield 文本；生成器耗尽后 `last_meta` 照常记录（含总耗时与用量）。
+
+        与 `answer` 完全同构：同一 system prompt 选择逻辑（含 prompt_version）、
+        同一聚合思考分流、同一缓存键——流式拼装写下的缓存，非流式调用直接命中。
+        体感延迟方案（T7）：不等整段生成，首 token 即出。
+        """
+        version = self.llm_cfg.get("prompt_version")
+        system = prompts.resolve_system_answer(require_citation, version)
+        llm_cfg = self.llm_cfg
+        if aggregate:
+            agg_effort = llm_cfg.get("reasoning_effort_aggregate")
+            if agg_effort:  # 只在显式配置时覆盖，否则与全局一致（不悄悄改变行为）
+                llm_cfg = {**llm_cfg, "reasoning_effort": agg_effort}
+        stream, meta = llm.chat_stream(
+            llm_cfg,
+            prompts.USER_ANSWER.format(
+                context=prompts.format_context(chunks), question=question
+            ),
+            system_prompt=system,
+        )
+
+        def _gen():
+            yield from stream
+            self.last_meta = dict(meta)  # 生成器耗尽后 meta 才填充完整
+
+        return _gen()

@@ -122,11 +122,18 @@ def _cache_put(key: str, model: str, response: str) -> None:
 
 
 def _timing(t0: float, cached: bool, model: str) -> dict:
-    """构造计时元数据。`cached=True` 时 ms 是本地 sqlite 查询耗时，不是模型延迟。"""
+    """构造计时元数据。`cached=True` 时 ms 是本地 sqlite 查询耗时，不是模型延迟。
+
+    usage 三键固定在 meta 上（缺数据时为 None）：延迟数字此前只记耗时没记用量，
+    「term 单条 28s 但答案仅 308 字」这类归因无从做起——用量必须与耗时逐条同落盘。
+    """
     return {
         "ms": round((time.perf_counter() - t0) * 1000, 1),
         "cached": cached,
         "model": model,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "reasoning_tokens": None,
     }
 
 
@@ -165,18 +172,16 @@ def chat(
     return chat_timed(llm_cfg, user_prompt, system_prompt, temperature)[0]
 
 
-def chat_timed(
+def _build_request(
     llm_cfg: dict,
     user_prompt: str,
     system_prompt: str | None = None,
     temperature: float | None = None,
-) -> tuple[str, dict]:
-    """同 `chat`，但返回 (文本, 计时元数据)。
+) -> tuple[list[dict], dict, str, bool]:
+    """构造 (messages, 请求参数, 缓存键, 是否用缓存)。
 
-    计时口径（PLAN「延迟口径」）：`ms` 是这次调用的墙钟耗时，**缓存命中时它衡量的是
-    一次本地 sqlite 查询，不是模型延迟**——所以 `cached` 标志必须与耗时一起看，
-    否则缓存命中会把延迟低估到毫秒级（PLAN 里 1.3s 与 6.3s 的矛盾就是这类混淆）。
-    测真实延迟必须关缓存（`DOC_RAG_LLM_CACHE=0` / `--fresh-answers`）。
+    `chat_timed` 与 `chat_stream` 必须共用这里：参数任何一处不一致都会产生
+    不同的缓存键，流式写下的缓存非流式就命中不了（T7 的「缓存互通」契约）。
     """
     messages = []
     if system_prompt:
@@ -203,6 +208,25 @@ def chat_timed(
 
     use_cache = cache_enabled(llm_cfg)
     key = _cache_key(llm_cfg, messages, **kwargs)
+    return messages, kwargs, key, use_cache
+
+
+def chat_timed(
+    llm_cfg: dict,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+) -> tuple[str, dict]:
+    """同 `chat`，但返回 (文本, 计时元数据)。
+
+    计时口径（PLAN「延迟口径」）：`ms` 是这次调用的墙钟耗时，**缓存命中时它衡量的是
+    一次本地 sqlite 查询，不是模型延迟**——所以 `cached` 标志必须与耗时一起看，
+    否则缓存命中会把延迟低估到毫秒级（PLAN 里 1.3s 与 6.3s 的矛盾就是这类混淆）。
+    测真实延迟必须关缓存（`DOC_RAG_LLM_CACHE=0` / `--fresh-answers`）。
+    """
+    messages, kwargs, key, use_cache = _build_request(
+        llm_cfg, user_prompt, system_prompt, temperature
+    )
     t0 = time.perf_counter()
     if use_cache:
         cached = _cache_get(key)
@@ -238,18 +262,121 @@ def chat_timed(
         usage = getattr(resp, "usage", None)
         if usage:
             details = getattr(usage, "completion_tokens_details", None)
+            prompt_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tok = int(getattr(usage, "completion_tokens", 0) or 0)
+            reasoning_tok = int(getattr(details, "reasoning_tokens", 0) or 0)
             with _LOCK:
-                _STATS["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-                _STATS["completion_tokens"] += int(
-                    getattr(usage, "completion_tokens", 0) or 0
-                )
-                _STATS["reasoning_tokens"] += int(
-                    getattr(details, "reasoning_tokens", 0) or 0
-                )
+                _STATS["prompt_tokens"] += prompt_tok
+                _STATS["completion_tokens"] += completion_tok
+                _STATS["reasoning_tokens"] += reasoning_tok
+        else:
+            prompt_tok = completion_tok = reasoning_tok = None
         if use_cache and content:
             _cache_put(key, llm_cfg["model"], content)
         meta = _timing(t0, cached=False, model=llm_cfg["model"])
         meta["attempts"] = attempt + 1  # >1 说明发生过重试，耗时含退避等待
         meta["reasoning_effort"] = kwargs.get("reasoning_effort")
+        # 单次用量随 meta 透传（缓存命中/响应无 usage 时为 None，不算 0——0 会冒充「真实为零」）
+        meta["prompt_tokens"] = prompt_tok
+        meta["completion_tokens"] = completion_tok
+        meta["reasoning_tokens"] = reasoning_tok
         return content, meta
     raise RuntimeError(f"LLM 调用失败（已重试 {_RETRIES} 次）：{last_exc}")
+
+
+def chat_stream(
+    llm_cfg: dict,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+) -> tuple:
+    """流式调用：返回 (逐段 yield 文本的生成器, 逐步填充的 meta 字典)。
+
+    契约（T7，PLAN §5.2 体感延迟方案，不改任何基线）：
+    - 请求参数与缓存键经 `_build_request` 与 `chat_timed` 完全同源——流式完整拼装
+      后按**同一缓存键**写缓存，后续非流式调用直接命中，反之亦然；
+    - 流式同样受 `reasoning_effort` 等配置影响，行为与 `chat_timed` 一致；
+    - 缓存命中时整段文本作为单个 chunk 返回，`meta.cached=True`（无本次用量）；
+    - `meta` 在生成器耗尽后包含 ms / cached / model / usage 三键 / attempts。
+    中途断流：已 yield 的内容不重发也不缓存（部分答案入缓存会污染非流式调用）。
+    """
+    messages, kwargs, key, use_cache = _build_request(
+        llm_cfg, user_prompt, system_prompt, temperature
+    )
+    meta: dict = {"model": llm_cfg["model"]}
+
+    def _gen():
+        t0 = time.perf_counter()
+        if use_cache:
+            cached = _cache_get(key)
+            if cached is not None:
+                _STATS["hit"] += 1
+                meta.update(
+                    ms=round((time.perf_counter() - t0) * 1000, 1),
+                    cached=True,
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    reasoning_tokens=None,
+                )
+                yield cached
+                return
+        _STATS["miss"] += 1
+
+        client = OpenAI(
+            base_url=llm_cfg["base_url"],
+            api_key=llm_cfg["api_key"],
+            timeout=180.0,
+            max_retries=0,  # 同 chat_timed：重试只归应用层管，避免与 SDK 相乘
+            default_headers=llm_cfg.get("headers") or None,
+        )
+        parts: list[str] = []
+        usage_data = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "reasoning_tokens": None,
+        }
+        try:
+            # stream_options 让 DeepSeek 在流末尾补一个带 usage 的块（choices 为空）
+            stream = client.chat.completions.create(
+                model=llm_cfg["model"],
+                messages=messages,
+                stream=True,
+                stream_options={"include_usage": True},
+                **kwargs,
+            )
+            for chunk in stream:
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    details = getattr(usage, "completion_tokens_details", None)
+                    prompt_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
+                    completion_tok = int(getattr(usage, "completion_tokens", 0) or 0)
+                    reasoning_tok = int(getattr(details, "reasoning_tokens", 0) or 0)
+                    with _LOCK:
+                        _STATS["prompt_tokens"] += prompt_tok
+                        _STATS["completion_tokens"] += completion_tok
+                        _STATS["reasoning_tokens"] += reasoning_tok
+                    usage_data = {
+                        "prompt_tokens": prompt_tok,
+                        "completion_tokens": completion_tok,
+                        "reasoning_tokens": reasoning_tok,
+                    }
+                    continue  # usage 块没有 choices
+                for choice in getattr(chunk, "choices", None) or []:
+                    piece = getattr(getattr(choice, "delta", None), "content", None)
+                    if piece:
+                        parts.append(piece)
+                        yield piece
+        except Exception as exc:
+            raise RuntimeError(f"LLM 流式调用失败：{exc}") from exc
+        content = "".join(parts)
+        if use_cache and content:
+            _cache_put(key, llm_cfg["model"], content)
+        meta.update(
+            ms=round((time.perf_counter() - t0) * 1000, 1),
+            cached=False,
+            attempts=1,
+            reasoning_effort=kwargs.get("reasoning_effort"),
+            **usage_data,
+        )
+
+    return _gen(), meta

@@ -81,6 +81,33 @@ def _contains_loose(keyword: str, answer: str) -> bool:
     return pos == len(target)
 
 
+def _ndcg_at_k(got_ids: list[str], relevant: set[str], k: int = 8) -> float | None:
+    """二值相关 nDCG@k，与 recall/mrr 同口径：来源文档=相关，排除无来源题。
+
+    检索结果按 doc 去重取首个命中位次（同一文档的多个块不重复计贡献——
+    与 first_hit_rank 的口径一致）；IDCG 按相关文档数截断到 k。
+    消融 #3 此前只有 MRR（只看首个命中），nDCG 补上「命中越多越靠前越好」
+    的梯度——重排的价值本就该体现在整段排序质量上。
+    """
+    dcg = 0.0
+    seen: set[str] = set()
+    rank = 0
+    for doc_id in got_ids:
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        rank += 1
+        if rank > k:
+            break
+        if doc_id in relevant:
+            dcg += 1.0 / math.log2(rank + 1)
+    ideal_hits = min(len(relevant), k)
+    if ideal_hits == 0:
+        return None
+    idcg = sum(1.0 / math.log2(i + 1) for i in range(1, ideal_hits + 1))
+    return dcg / idcg
+
+
 def _contexts(results: list[dict], max_n: int | None = None) -> list[dict]:
     """构造送 LLM 的编号上下文；max_n 控制上限以约束输入 token（PLAN §8 成本控制）。"""
     if max_n:
@@ -192,6 +219,11 @@ def evaluate(
             if item.source_doc_ids
             else None
         )
+        ndcg = (
+            _ndcg_at_k(got_ids, set(item.source_doc_ids), k=8)
+            if item.source_doc_ids
+            else None
+        )
 
         ctx = _contexts(
             results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
@@ -237,6 +269,18 @@ def evaluate(
         citation_valid = all(1 <= n <= len(ctx) for n in refs) if refs else None
         citation_present = bool(refs) if answer else None
 
+        # 逐条用量（T5）：延迟数字此前只记耗时没记用量，无法解释「term 单条 28s
+        # 但答案仅 308 字」——reasoning token 与耗时必须能对上号。缓存命中时
+        # usage 为 None（缓存的答案当时没记用量），合计时按缺失跳过。
+        usage = None
+        if isinstance(synth_meta, dict):
+            u = {
+                k: synth_meta.get(k)
+                for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
+            }
+            if any(v is not None for v in u.values()):
+                usage = u
+
         per_item.append(
             {
                 "id": item.id,
@@ -244,6 +288,7 @@ def evaluate(
                 "question": item.question,
                 "first_hit_rank": first_rank,
                 "doc_coverage": round(coverage, 4) if coverage is not None else None,
+                "ndcg_at_8": round(ndcg, 4) if ndcg is not None else None,
                 "n_source_docs": len(item.source_doc_ids),
                 "answered_ok": answered_ok,
                 "answered_ok_loose": answered_ok_loose,
@@ -261,6 +306,7 @@ def evaluate(
                     "retrieval_total": round((t_rerank - t0) * 1000, 1),
                     "synthesize": (synth_meta or {}).get("ms") if with_answers else None,
                     "synth_cached": bool((synth_meta or {}).get("cached")) if with_answers else None,
+                    "usage": usage,
                     "total": round((t_synth - t_item) * 1000, 1),
                 },
             }
@@ -273,6 +319,7 @@ def evaluate(
     hits5 = [r for r in with_source if r["first_hit_rank"] and r["first_hit_rank"] <= 5]
     hitsN = [r for r in with_source if r["first_hit_rank"]]
     mrr_scores = [1.0 / r["first_hit_rank"] for r in with_source if r["first_hit_rank"]]
+    ndcg_scores = [r["ndcg_at_8"] for r in with_source if r["ndcg_at_8"] is not None]
     scorable = [
         r for r in per_item
         if not _is_refusable(items, r["id"]) and r["answered_ok"] is not None
@@ -287,6 +334,8 @@ def evaluate(
         "recall_at_5": len(hits5) / len(with_source),
         f"recall_at_{top_n}": len(hitsN) / len(with_source),
         "mrr": sum(mrr_scores) / len(with_source),
+        # nDCG@8（二值相关，doc 去重）：整段排序质量，与 recall/mrr 同分母
+        "ndcg_at_8": round(sum(ndcg_scores) / len(ndcg_scores), 4) if ndcg_scores else None,
         "mean_doc_coverage": round(sum(covs) / len(covs), 4) if covs else None,
         "contains_acc": _safe_div(
             sum(1 for r in scorable if r["answered_ok"]), len(scorable)
@@ -324,6 +373,11 @@ def evaluate(
     if latency:
         summary["latency"] = latency
 
+    # 生效的 prompt 版本：meta 必须能区分「基线 / 收紧」两组答案——三组对照
+    # 当年就死在这里。指纹按生效版本算，两个版本指纹必然不同。
+    llm_section = cfg.get("llm") or {}
+    prompt_version = llm_section.get("prompt_version") or prompts.DEFAULT_PROMPT_VERSION
+
     ragas_summary = None
     if with_ragas:
         ragas_summary = _run_ragas(
@@ -343,11 +397,14 @@ def evaluate(
             "with_answers": with_answers,
             # 让结果文件自证身份：延迟数字曾因「不知道是哪个模型、缓存开没开」
             # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
-            "llm_model": (cfg.get("llm") or {}).get("model"),
-            "answer_cache": cache_enabled(cfg.get("llm") or {}) if with_answers else None,
+            "llm_model": llm_section.get("model"),
+            "answer_cache": cache_enabled(llm_section) if with_answers else None,
             # prompt 指纹：三组对照的基线/收紧两组答案曾因 meta 不记 prompt 版本
             # 而无法归属（哪组用了哪个 prompt 靠猜），结论只能整体作废
-            "prompt_fingerprint": prompts.fingerprint() if with_answers else None,
+            "prompt_version": prompt_version if with_answers else None,
+            "prompt_fingerprint": (
+                prompts.fingerprint(prompt_version) if with_answers else None
+            ),
         },
         "summary": summary,
         "ragas": ragas_summary,
@@ -402,6 +459,15 @@ def _latency_summary(per_item: list[dict]) -> dict | None:
         "cached_answers": sum(1 for r in rows if r["latency"].get("synth_cached")),
     }
     summary["cache_contaminated"] = summary["cached_answers"] > 0
+    # 全量用量合计（T5）：把「耗时 → 用量」的归因做到汇总层。只累计真实记录的
+    # 用量；缓存命中（usage=None）不计入也不冒充 0，分母口径见 usage_n
+    usage_rows = [r["latency"].get("usage") for r in rows if r["latency"].get("usage")]
+    if usage_rows:
+        summary["usage_n"] = len(usage_rows)
+        summary["usage"] = {
+            k: sum(int(u.get(k) or 0) for u in usage_rows)
+            for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
+        }
     # 端到端是否达标：PLAN 目标 P95 ≤ 8s（用全量 total，含缓存命中的快条目）
     e2e = summary["total"]
     summary["target_p95_ms"] = 8000

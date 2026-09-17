@@ -380,6 +380,120 @@ def test_runner_passes_aggregate_flag_to_synthesizer(tmp_path, monkeypatch):
     assert syn.answer.call_args.kwargs.get("aggregate") is True
 
 
+# ------------------------------------------------------- 逐条 token 用量（T5）
+
+
+def _fake_client_with(resp_holder: dict, usage):
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            def _create(**kw):
+                resp = Mock()
+                resp.choices = [Mock(message=Mock(content="答案"))]
+                resp.usage = usage
+                return resp
+
+            self.chat = Mock(completions=Mock(create=_create))
+
+    return _FakeClient
+
+
+def test_chat_timed_reports_usage_in_meta(monkeypatch):
+    """每次真实调用的 usage 必须随 meta 透传——延迟归因（reasoning vs 耗时）靠它。"""
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
+    usage = Mock(prompt_tokens=100, completion_tokens=50)
+    usage.completion_tokens_details = Mock(reasoning_tokens=40)
+    monkeypatch.setattr(
+        llm_mod, "OpenAI", _fake_client_with({}, usage)
+    )
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
+    _, meta = llm_mod.chat_timed(cfg, "问题")
+    assert meta["prompt_tokens"] == 100
+    assert meta["completion_tokens"] == 50
+    assert meta["reasoning_tokens"] == 40
+
+
+def test_chat_timed_usage_defaults_to_none_without_usage(monkeypatch):
+    """响应无 usage 时缺省为 None 而不是 0——0 会冒充「真实为零」的用量。"""
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
+    monkeypatch.setattr(llm_mod, "OpenAI", _fake_client_with({}, None))
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
+    _, meta = llm_mod.chat_timed(cfg, "问题")
+    assert meta["prompt_tokens"] is None
+    assert meta["completion_tokens"] is None
+    assert meta["reasoning_tokens"] is None
+
+
+def test_chat_timed_cached_hit_has_no_usage(monkeypatch):
+    """缓存命中没有本次调用可言，usage 必须为 None（不能拿上一次的数冒充）。"""
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: True)
+    monkeypatch.setattr(llm_mod, "_cache_get", lambda key: "缓存答案")
+    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
+    _, meta = llm_mod.chat_timed(cfg, "问题")
+    assert meta["cached"] is True
+    assert meta["prompt_tokens"] is None
+
+
+def test_evaluate_records_usage_per_item_and_totals(tmp_path, monkeypatch):
+    """runner 把 synth_meta 的用量写进逐条 latency.usage，summary 给全量合计。"""
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [
+        {
+            "id": "q001", "type": "fact", "question": "费用？",
+            "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
+        },
+        {
+            "id": "q002", "type": "fact", "question": "预算？",
+            "expected_answer": "9元", "source_doc_ids": ["d1"], "must_contain": ["9元"],
+        },
+    ]}), encoding="utf-8")
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
+    ]
+    synthesizer = Mock()
+    synthesizer.answer.side_effect = ["费用67元 [1]", "预算9元 [1]"]
+    synthesizer.last_meta = {
+        "ms": 5000.0, "cached": False, "model": "m",
+        "prompt_tokens": 100, "completion_tokens": 50, "reasoning_tokens": 40,
+    }
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+
+    cfg = {"retrieval": {}, "llm": {"model": "m", "cache": False}}
+    results = runner.evaluate(gold, cfg=cfg)
+    item = results["items"][0]
+    assert item["latency"]["usage"] == {
+        "prompt_tokens": 100, "completion_tokens": 50, "reasoning_tokens": 40,
+    }
+    usage = results["summary"]["latency"]["usage"]
+    assert usage["prompt_tokens"] == 200
+    assert usage["completion_tokens"] == 100
+    assert usage["reasoning_tokens"] == 80
+    assert results["summary"]["latency"]["usage_n"] == 2
+
+
+def test_evaluate_without_usage_still_writes_results(tmp_path, monkeypatch):
+    """Mock/旧版 synthesizer 没有 usage 时：逐条为 None，summary 不造合计。"""
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": [{
+        "id": "q001", "type": "fact", "question": "费用？",
+        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
+    }]}), encoding="utf-8")
+    retriever = Mock(collection="c", cfg={})
+    retriever.retrieve.return_value = [
+        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
+    ]
+    synthesizer = Mock()
+    synthesizer.answer.return_value = "费用67元 [1]"
+    synthesizer.last_meta = {"ms": 1234.5, "cached": False, "model": "m"}
+    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+
+    results = runner.evaluate(gold, cfg={"retrieval": {}, "llm": {"model": "m"}})
+    assert results["items"][0]["latency"]["usage"] is None
+    assert "usage" not in results["summary"]["latency"]
+
+
 # ------------------------------------------------------- prompt 版本指纹
 
 
