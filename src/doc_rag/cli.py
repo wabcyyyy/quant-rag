@@ -38,16 +38,27 @@ def check() -> None:
 
     t0 = time.perf_counter()
     try:
-        client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=30.0)
+        client = OpenAI(base_url=llm["base_url"], api_key=llm["api_key"], timeout=120.0)
         resp = client.chat.completions.create(
             model=llm["model"],
             messages=[{"role": "user", "content": "只回复两个字：正常"}],
-            max_tokens=8,
+            max_tokens=512,  # 推理型模型会先消耗 reasoning token，预算给小了 content 会是 None
             temperature=0,
         )
         dt = time.perf_counter() - t0
-        reply = resp.choices[0].message.content
-        typer.echo(f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）回复：{reply!r}")
+        msg = resp.choices[0].message
+        reply = (msg.content or "").strip()
+        reasoning = (getattr(msg, "reasoning", None) or "")
+        if reply:
+            typer.echo(f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）回复：{reply!r}")
+        elif reasoning:
+            typer.echo(
+                f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）但 content 为空、仅返回 reasoning "
+                f"（推理型模型 + token 预算不足）：{reasoning[:60]!r}"
+            )
+            typer.echo("      提示：正式调用需留足 max_tokens，或换非推理型模型")
+        else:
+            typer.echo(f"[LLM] {llm['model']} 连通 ✓（{dt:.1f}s）但返回空内容，请检查模型")
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"[LLM] 失败：{exc}")
         raise typer.Exit(1) from exc

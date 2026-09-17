@@ -16,6 +16,23 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[2]
 
 
+_BASE_URL_STRIP_SUFFIXES = ("/chat/completions", "/responses", "/embeddings")
+
+
+def _normalize_base_url(url: str) -> str:
+    """归一化 base_url：容忍误填完整端点路径。
+
+    实测坑：把 OpenRouter 的 Responses API 端点（/api/v1/responses）当 base_url 填入，
+    OpenAI SDK 会拼成 /api/v1/responses/chat/completions → 404。
+    """
+    out = (url or "").rstrip("/")
+    for suffix in _BASE_URL_STRIP_SUFFIXES:
+        if out.endswith(suffix):
+            out = out[: -len(suffix)]
+            break
+    return out
+
+
 def _expand_env(value: Any) -> Any:
     if isinstance(value, str) and value.startswith("env:"):
         return os.environ.get(value[4:], "")
@@ -31,4 +48,8 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg_path = Path(path) if path else ROOT / "configs" / "default.yaml"
     with cfg_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    return _expand_env(cfg)
+    cfg = _expand_env(cfg)
+    for section in ("llm", "embedding", "rerank"):
+        if isinstance(cfg.get(section), dict) and cfg[section].get("base_url"):
+            cfg[section]["base_url"] = _normalize_base_url(cfg[section]["base_url"])
+    return cfg
