@@ -1,5 +1,7 @@
 # doc-rag · 企业文档 RAG
 
+[![CI](https://github.com/wabcyyyy/quant-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/wabcyyyy/quant-rag/actions/workflows/ci.yml)
+
 面向公司会议记录类文档（**飞书批量导出 PDF / .doc(x)**，1121 篇 / 3856 块）的检索问答系统。
 设计决策、取舍理由与评估口径见 [PLAN.md](PLAN.md)。
 
@@ -48,7 +50,7 @@ uv run doc-rag check   # API 冒烟：LLM 连通 / Embedding 维度 / sparse 探
 docker compose up -d   # Qdrant :6333
 uv run doc-rag profile # Phase 0：语料画像（data/raw 放入语料后执行）
 uv run doc-rag ingest  # 双路接入 → data/parsed 统一中间 JSON
-uv run pytest          # 测试（110 项，全离线 mock，零 API 成本）
+uv run pytest          # 测试（111 项，全离线 mock，零 API 成本；CI 每次推送同步跑 ruff + pytest）
 ```
 
 ## 状态（对照 PLAN §7 路线图）
@@ -173,6 +175,12 @@ PDF 与 docx 归一到同一套 block 模型，下游分块/入库只认它，�
 
 > 本地响应缓存使重复评估近乎零成本（实测命中 90%）：同配置重跑不重复付费。
 
+**评估集可复现性**：真实黄金集含公司内容，不入库；`data/eval/golden_sample.json` 提供一份
+**脱敏合成的格式模板**（虚构公司内容，10 条覆盖全部 7 题型），字段契约见
+`src/doc_rag/eval/schema.py`，构造脚本与口径见 `doc-rag gen-gold` 与 PLAN §5.3。
+`doc-rag eval --gold data/eval/golden_sample.json …` 即可消费同构数据（source_doc_ids
+为示意占位，自建语料时替换为真实入库的 doc_id）。
+
 ## 使用示例（带引用与拒答）
 
 > ⚠️ 以下为**示意数据**（合规：公司语料与真实答案不入库、不外传），输出格式与真实一致。
@@ -219,7 +227,8 @@ $ uv run doc-rag query "公司关于碳排放配额的管理制度是什么？"
 
 ## 注意
 
-- `data/raw`、`data/parsed`、`data/eval` 已 gitignore——**公司文档严禁提交**（合规，见 PLAN §8）
+- `data/raw`、`data/parsed`、`data/eval` 已 gitignore——**公司文档严禁提交**（合规，见 PLAN §8；
+  唯一例外是脱敏合成样例 `data/eval/golden_sample.json`，见「评估集可复现性」）
 - `docs/` 已 gitignore——本地个人材料不入库
 - API Key 全部走环境变量（`configs/default.yaml` 中 `env:` 前缀）
 - 评估依赖：`uv sync --extra eval`

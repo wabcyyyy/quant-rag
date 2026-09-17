@@ -1,0 +1,129 @@
+{
+  "meta": {
+    "gold_version": "sample-1",
+    "sample": true,
+    "note": "格式模板：全部内容为虚构合成（虚构公司「云帆科技」），不含任何真实语料；真实黄金集 data/eval/gold.json 含公司内容，不入库。字段契约见 src/doc_rag/eval/schema.py（GoldItem），构造脚本与口径见 doc-rag gen-gold 与 PLAN §5.3。source_doc_ids 为示意占位——在自己的语料上复用本模板时，须替换为真实入库的 doc_id。",
+    "count": 10,
+    "type_distribution": {
+      "fact": 2,
+      "decision": 2,
+      "open_discussion": 1,
+      "term": 2,
+      "cross_doc": 1,
+      "time_filter": 1,
+      "no_answer": 1
+    }
+  },
+  "items": [
+    {
+      "id": "s001",
+      "type": "fact",
+      "question": "在《会议档案_办公会_2026年第6周-会议纪要》中，客服系统升级的预算是多少？",
+      "expected_answer": "客服系统升级预算为 42 万元，含软件采购与实施服务两部分。",
+      "must_contain": ["42", "实施服务"],
+      "source_doc_ids": ["a1b2c3d4e5f60718"],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第6周-会议纪要",
+      "origin": null
+    },
+    {
+      "id": "s002",
+      "type": "fact",
+      "question": "新仓库计划什么时候投入使用？",
+      "expected_answer": "新仓库计划 2026 年 6 月底完成验收并投入使用。",
+      "must_contain": ["2026 年 6 月"],
+      "source_doc_ids": ["b2c3d4e5f6071829"],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第9周-会议纪要",
+      "origin": null
+    },
+    {
+      "id": "s003",
+      "type": "decision",
+      "question": "公司对采购审批权限做出了什么调整？",
+      "expected_answer": "决定自 2026 年 Q3 起，单笔 5 万元以下采购的审批权限下放至各部门负责人。",
+      "must_contain": ["5 万元以下", "下放"],
+      "source_doc_ids": ["c3d4e5f60718293a"],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第11周-会议纪要",
+      "origin": "programmatic"
+    },
+    {
+      "id": "s004",
+      "type": "decision",
+      "question": "关于供应商年度评审，公司定下了什么安排？",
+      "expected_answer": "决定每年 12 月由采购部牵头开展供应商年度评审，连续两年评分低于 70 分的供应商终止合作。",
+      "must_contain": ["年度评审", "70 分"],
+      "source_doc_ids": ["c3d4e5f60718293a"],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第11周-会议纪要",
+      "origin": null
+    },
+    {
+      "id": "s005",
+      "type": "open_discussion",
+      "question": "办公会上关于异地灾备机房选址最终定了什么？",
+      "expected_answer": "会上讨论了杭州与贵阳两个候选地的成本与网络条件，未形成决议，要求行政部补充电力报价后下次会议再议。",
+      "must_contain": ["未形成决议", "灾备"],
+      "source_doc_ids": ["d4e5f60718293ab4"],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第8周-会议纪要",
+      "origin": null
+    },
+    {
+      "id": "s006",
+      "type": "term",
+      "question": "公司内部把供应商协同相关的系统叫什么名字？",
+      "expected_answer": "供应商协同平台（SCP），供应商准入与对账流程在 SCP 二期内完成。",
+      "must_contain": ["供应商协同平台", "SCP"],
+      "source_doc_ids": ["e5f60718293ab4c5"],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第12周-会议纪要",
+      "origin": null
+    },
+    {
+      "id": "s007",
+      "type": "term",
+      "question": "公司的差旅报销制度文件叫什么名称？",
+      "expected_answer": "《差旅与费用报销管理办法（V3）》，自 2026 年起全公司执行。",
+      "must_contain": ["差旅与费用报销管理办法"],
+      "source_doc_ids": ["f60718293ab4c5d6"],
+      "refusable": false,
+      "source_title": "制度档案_行政_2026年第2周-差旅与费用报销管理办法",
+      "origin": null
+    },
+    {
+      "id": "s008",
+      "type": "cross_doc",
+      "question": "客服系统、仓储系统和财务系统分别由哪些部门负责推进？",
+      "expected_answer": "客服系统由客户成功部负责，仓储系统由供应链部负责，财务系统由财务部牵头推进。",
+      "must_contain": ["客户成功部", "供应链部", "财务部"],
+      "source_doc_ids": ["a1b2c3d4e5f60718", "b2c3d4e5f6071829", "0718293ab4c5d6e7"],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic"
+    },
+    {
+      "id": "s009",
+      "type": "time_filter",
+      "question": "2025 年公司组织过几次全员安全演练？分别在什么时候？",
+      "expected_answer": "2025 年组织过 2 次全员安全演练，分别在 4 月与 11 月。",
+      "must_contain": ["2 次", "4 月", "11 月"],
+      "source_doc_ids": ["718293ab4c5d6e7f"],
+      "refusable": false,
+      "source_title": "会议档案_安全_2025年第17周-会议纪要",
+      "origin": null
+    },
+    {
+      "id": "s010",
+      "type": "no_answer",
+      "question": "公司在区块链存证方面有什么制度或布局？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": null
+    }
+  ]
+}
