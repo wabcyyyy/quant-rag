@@ -90,3 +90,27 @@ def test_format_report_renders_all_sections(tmp_path):
     assert "全量同题配对差异" in text
     assert "子集敏感性" in text
     assert "cross_doc" in text
+
+
+def test_load_scores_accepts_eval_results_format(tmp_path):
+    """T4 三组对照的 compare 直接吃 eval 结果文件：ragas 摘要嵌在 results["ragas"]。"""
+    payload = {
+        "meta": {"collection": "c", "retrieval": "r", "llm_model": "m"},
+        "summary": {"n_items": 2, "recall_at_5": 0.9, "mrr": 0.8},  # 客观指标，无 per_item
+        "ragas": {
+            "n": 2,
+            "metrics": ["faithfulness"],
+            "faithfulness": 0.95,
+            "per_item": [
+                {"id": "q1", "type": "fact", "faithfulness": 1.0},
+                {"id": "q2", "type": "term", "faithfulness": 0.9},
+            ],
+        },
+        "items": [],
+    }
+    path = tmp_path / "eval_results.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = load_scores(path)
+    assert loaded["metric"] == "faithfulness"
+    assert loaded["items"] == {"q1": 1.0, "q2": 0.9}
+    assert loaded["types"] == {"q1": "fact", "q2": "term"}

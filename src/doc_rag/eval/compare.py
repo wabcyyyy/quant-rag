@@ -22,12 +22,23 @@ _SUPPORTED = ("faithfulness", "answer_relevancy")
 
 
 def load_scores(path: str | Path) -> dict:
-    """读一个 RAGAS 结果文件 → {metric, items{id: score}, meta, summary}。"""
+    """读一个 RAGAS 结果文件 → {metric, items{id: score}, meta, summary}。
+
+    兼容两种落盘格式：`--ragas-from` 产物（ragas 摘要就是顶层 summary）与
+    `eval` 直跑产物（ragas 摘要嵌在 results["ragas"]，顶层 summary 是客观指标）
+    ——三组对照（T4）的 compare 直接吃 eval 结果文件，不该要求用户再手工拆一份。
+    """
     p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))
     summary = data.get("summary") or {}
     if "per_item" not in summary:
-        raise ValueError(f"{p.name} 没有逐条分数（旧版只存均值，需用 --ragas-sample 重跑）")
+        ragas = data.get("ragas") or {}
+        if isinstance(ragas, dict) and "per_item" in ragas:
+            summary = ragas
+        else:
+            raise ValueError(
+                f"{p.name} 没有逐条分数（旧版只存均值，需用 --ragas-sample 重跑）"
+            )
     metric = next((m for m in summary.get("metrics", []) if m in _SUPPORTED), None)
     if metric is None:
         raise ValueError(f"{p.name} 未包含可判读指标：{summary.get('metrics')}")
