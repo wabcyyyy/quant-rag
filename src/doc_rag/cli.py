@@ -118,22 +118,27 @@ def ingest(
     recreate: Annotated[bool, typer.Option(help="先删除并重建 collection（清空重灌）")] = False,
     limit: Annotated[int | None, typer.Option(help="只处理前 N 个文件（试跑）")] = None,
     no_llm_meta: Annotated[bool, typer.Option(help="跳过 LLM 元数据抽取（只用文件名信号）")] = False,
+    chunk_strategy: Annotated[str, typer.Option(help="分块策略：structural（默认）/ fixed（消融对照）")] = "structural",
+    index_only: Annotated[bool, typer.Option(help="跳过解析，直接对已有中间 JSON 入库")] = False,
 ) -> None:
     """全链路入库：解析 → 分块 → LLM 元数据 → Embed → Qdrant。"""
     cfg = load_config()
     raw = raw_dir or Path(cfg["paths"]["raw"])
-    if not raw.exists():
-        typer.echo(f"语料目录不存在：{raw}")
-        raise typer.Exit(1)
     parsed = Path(cfg["paths"]["parsed"])
 
-    stats = ingest_pipeline.run(raw, parsed, limit=limit)
-    typer.echo(
-        f"解析：共 {stats['total']} 个文件，成功 {stats['parsed']}，"
-        f"去重跳过 {stats['skipped_duplicate']}，失败 {len(stats['failed'])}"
-    )
-    for item in stats["failed"]:
-        typer.echo(f"  [解析失败] {item['file']}: {item['error']}")
+    if index_only:
+        typer.echo(f"跳过解析，直接入库已有中间 JSON（{parsed}）")
+    else:
+        if not raw.exists():
+            typer.echo(f"语料目录不存在：{raw}")
+            raise typer.Exit(1)
+        stats = ingest_pipeline.run(raw, parsed, limit=limit)
+        typer.echo(
+            f"解析：共 {stats['total']} 个文件，成功 {stats['parsed']}，"
+            f"去重跳过 {stats['skipped_duplicate']}，失败 {len(stats['failed'])}"
+        )
+        for item in stats["failed"]:
+            typer.echo(f"  [解析失败] {item['file']}: {item['error']}")
     if parse_only:
         return
 
@@ -141,9 +146,17 @@ def ingest(
 
     collection = kb or cfg["qdrant"]["collection"]
     result = index_parsed(
-        parsed, cfg, collection=collection, recreate=recreate, use_llm_meta=not no_llm_meta
+        parsed,
+        cfg,
+        collection=collection,
+        recreate=recreate,
+        use_llm_meta=not no_llm_meta,
+        chunk_strategy=chunk_strategy,
     )
-    typer.echo(f"入库：{result['docs']} 篇 / {result['chunks']} 块 → Qdrant[{collection}]")
+    typer.echo(
+        f"入库：{result['docs']} 篇 / {result['chunks']} 块 → Qdrant[{collection}]"
+        f"（分块策略：{chunk_strategy}）"
+    )
     for item in result["failed"]:
         typer.echo(f"  [入库失败] {item['file']}: {item['error']}")
 

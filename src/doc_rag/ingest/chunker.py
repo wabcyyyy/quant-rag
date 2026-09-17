@@ -52,6 +52,7 @@ def _slide(text: str) -> list[str]:
 
 
 def chunk_document(doc: IntermediateDoc) -> list[Chunk]:
+    """结构感知分块（默认策略）。"""
     chunks: list[Chunk] = []
     section_path: list[str] = []
     current: list[Block] = []
@@ -103,3 +104,47 @@ def chunk_document(doc: IntermediateDoc) -> list[Chunk]:
             flush()
     flush()
     return chunks
+
+
+def chunk_fixed(
+    doc: IntermediateDoc, size: int = 512, overlap: int = 64
+) -> list[Chunk]:
+    """固定窗口切分（消融 #2 的对照组）。
+
+    刻意忽略结构：把全文当纯文本按字符数硬切（表格也会被切断），
+    用来量化「结构感知分块」相对「固定切分」的增益。
+    """
+    text = "\n".join(b.text for b in doc.blocks if b.text.strip())
+    if not text:
+        return []
+    chunks: list[Chunk] = []
+    step = max(size - overlap, 1)
+    for start in range(0, len(text), step):
+        part = text[start : start + size]
+        if not part.strip():
+            continue
+        chunks.append(
+            Chunk(
+                chunk_id=f"{doc.meta.doc_id}:{len(chunks) + 1}",
+                doc_id=doc.meta.doc_id,
+                text=part,
+                section_path=[],  # 固定切分无结构信息
+                page=None,
+                block_type="fixed",
+            )
+        )
+        if start + size >= len(text):
+            break
+    return chunks
+
+
+_STRATEGIES = {
+    "structural": chunk_document,
+    "fixed": chunk_fixed,
+}
+
+
+def chunk_by(strategy: str, doc: IntermediateDoc) -> list[Chunk]:
+    if strategy not in _STRATEGIES:
+        raise ValueError(f"未知分块策略：{strategy}（可选 {list(_STRATEGIES)}）")
+    return _STRATEGIES[strategy](doc)

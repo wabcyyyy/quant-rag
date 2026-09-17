@@ -12,7 +12,7 @@ from pathlib import Path
 from qdrant_client import QdrantClient, models
 
 from .bm25 import build_bm25_text
-from .chunker import chunk_document
+from .chunker import chunk_by
 from .embedder import Embedder
 from .metadata import base_meta, extract_metadata
 from .schema import Chunk, IntermediateDoc
@@ -59,6 +59,7 @@ def index_parsed(
     collection: str | None = None,
     recreate: bool = False,
     use_llm_meta: bool = True,
+    chunk_strategy: str = "structural",
 ) -> dict:
     client = QdrantClient(url=cfg["qdrant"]["url"], timeout=60.0)
     name = collection or cfg["qdrant"]["collection"]
@@ -90,7 +91,7 @@ def index_parsed(
 
     for (json_file, doc), meta in zip(docs, metas):
         try:
-            chunks = chunk_document(doc)
+            chunks = chunk_by(chunk_strategy, doc)
             if not chunks:
                 continue
             # 幂等：清掉本文档旧块再插
