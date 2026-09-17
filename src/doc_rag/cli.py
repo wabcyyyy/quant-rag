@@ -183,6 +183,9 @@ def query(
 def gen_gold(
     out: Annotated[Path | None, typer.Option(help="黄金集输出路径")] = None,
     seed: Annotated[int, typer.Option(help="采样随机种子（可复现）")] = 42,
+    programmatic_only: Annotated[
+        bool, typer.Option(help="只重算程序化题型（保留已有 LLM 题，零 LLM 成本）")
+    ] = False,
 ) -> None:
     """生成黄金评估集（LLM 生成 + 程序化构造，构造过程可复现）。"""
     from doc_rag.eval.goldgen import generate
@@ -193,7 +196,9 @@ def gen_gold(
         typer.echo("先跑 doc-rag ingest 生成解析产物")
         raise typer.Exit(1)
     out_file = out or Path(cfg["eval"]["gold_file"])
-    meta = generate(parsed, out_file, cfg["llm"], seed=seed)
+    meta = generate(
+        parsed, out_file, cfg["llm"], seed=seed, programmatic_only=programmatic_only
+    )
     typer.echo(f"黄金集已生成：{out_file}")
     typer.echo(f"共 {meta['count']} 条，题型分布：{meta['type_distribution']}")
 
@@ -207,6 +212,7 @@ def evaluate(
     ragas: Annotated[bool, typer.Option(help="启用 RAGAS 第二轨（较慢）")] = False,
     ragas_from: Annotated[Path | None, typer.Option(help="对已有评估结果补跑 RAGAS（答案复用，省钱）")] = None,
     retrieval_only: Annotated[bool, typer.Option(help="只评检索指标（不调 LLM 合成）")] = False,
+    mode: Annotated[str | None, typer.Option(help="检索模式：hybrid（默认）/ dense（消融对照）")] = None,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -236,6 +242,7 @@ def evaluate(
         limit=limit,
         with_ragas=ragas,
         with_answers=not retrieval_only,
+        mode=mode,
     )
     s = results["summary"]
     typer.echo(f"\n=== 评估结果（{s['n_items']} 条 · top_n={top_n} · {results['meta']['retrieval']}）===")

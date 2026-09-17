@@ -35,40 +35,52 @@ class HybridRetriever:
         question: str,
         top_n: int | None = None,
         filters: dict | None = None,
+        mode: str | None = None,
     ) -> list[dict]:
-        """双路检索 + RRF 融合。
+        """检索。mode="dense" 走纯向量（消融对照组），默认 "hybrid" 走双路 RRF。
 
         filters 为简单匹配条件：{"topics": "预算"} / {"attendees": ["张三"]} /
         {"doc_date": {"gte": "2026-01-01"}}（消融 #5 的开关）。
-        返回按融合排名的 [{chunk_id, doc_id, title, text, section_path, page,
+        返回按排名的 [{chunk_id, doc_id, title, text, section_path, page,
         block_type, doc_date, score}]。
         """
         limit = top_n or int(self.cfg.get("fusion_limit", 12))
+        mode = mode or self.cfg.get("mode", "hybrid")
         qvec = self.embedder.embed([question])[0]
-        qtext = build_bm25_text(question)
         qfilter = self._build_filter(filters)
 
-        prefetch = [
-            models.Prefetch(
+        if mode == "dense":
+            response = self.client.query_points(
+                self.collection,
                 query=qvec,
                 using="dense",
-                limit=int(self.cfg.get("k_dense", 20)),
-                filter=qfilter,
-            ),
-            models.Prefetch(
-                query=models.Document(text=qtext, model=_BM25_MODEL),
-                using="bm25",
-                limit=int(self.cfg.get("k_bm25", 20)),
-                filter=qfilter,
-            ),
-        ]
-        response = self.client.query_points(
-            self.collection,
-            prefetch=prefetch,
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=limit,
-            with_payload=True,
-        )
+                limit=limit,
+                query_filter=qfilter,
+                with_payload=True,
+            )
+        else:
+            qtext = build_bm25_text(question)
+            prefetch = [
+                models.Prefetch(
+                    query=qvec,
+                    using="dense",
+                    limit=int(self.cfg.get("k_dense", 20)),
+                    filter=qfilter,
+                ),
+                models.Prefetch(
+                    query=models.Document(text=qtext, model=_BM25_MODEL),
+                    using="bm25",
+                    limit=int(self.cfg.get("k_bm25", 20)),
+                    filter=qfilter,
+                ),
+            ]
+            response = self.client.query_points(
+                self.collection,
+                prefetch=prefetch,
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                limit=limit,
+                with_payload=True,
+            )
         results = []
         for point in response.points:
             payload = point.payload or {}

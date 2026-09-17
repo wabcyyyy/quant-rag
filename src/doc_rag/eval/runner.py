@@ -63,8 +63,11 @@ def evaluate(
     limit: int | None = None,
     with_ragas: bool = False,
     with_answers: bool = True,
+    mode: str | None = None,
 ) -> dict:
     cfg = cfg or load_config()
+    if mode:
+        cfg["retrieval"]["mode"] = mode  # 消融开关：dense / hybrid
     retriever, synthesizer = _build_retriever(cfg, collection)
     payload = json.loads(gold_file.read_text(encoding="utf-8"))
     items_raw = payload["items"][:limit] if limit else payload["items"]
@@ -156,7 +159,7 @@ def evaluate(
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "top_n": top_n,
             "collection": retriever.collection,
-            "retrieval": "dense+bm25+rrf",
+            "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]",
             "with_answers": with_answers,
         },
         "summary": summary,

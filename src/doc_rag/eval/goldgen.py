@@ -54,8 +54,63 @@ _NO_ANSWER_CANDIDATES = [
 _STOPWORDS = set(
     "会议 讨论 决定 汇报 跟进 安排 进行 相关 工作 内容 情况 问题 要求 完成 确认 通知 "
     "公司 项目 部分 以下 以上 今天 明天 昨天 时间 地点 人员 同志 各位 大家 继续 针对 "
-    "目前 目前 目前 需要 可以 应该 已经 会上 关于 我们 他们 自己 很多 非常".split()
+    "目前 需要 可以 应该 已经 会上 关于 我们 他们 自己 很多 非常 "
+    # 实测噪声（首版跨文档/时间题选词质量差，Phase 2 记录）
+    "处理结果 本处 校正 文本处理 代码运行 case dta 议题 纪要 与会 本次 执行 owner 结果 "
+    "记录 文档 文件 首页 未命名 信息 数据 系统 流程 管理 服务 支持 使用 建议 "
+    # 会议纪要模板词（跨全库出现，无区分度）
+    "提案 提案者 附议 附议区 决议 决议区 动议 动议区 辩论 辩论区 投票 投票区 元数据 元数据区 "
+    "同意 否决 弃权 单选 实名 立即 后续 备注 说明 附件 版本 编号 目录 标题 正文 摘要".split()
 )
+
+# 人名实体抽取：只用高精度结构信号（实测零噪声，见 Phase 2 记录）
+_NAME_CONTEXT_RES = (
+    re.compile(r"@([\u4e00-\u9fa5]{2,4})[：:]"),  # 会议纪要「部门@姓名：内容」
+    re.compile(r"提案者[：:]\s*([\u4e00-\u9fa5]{2,4})"),
+    re.compile(r"主持[：:]\s*([\u4e00-\u9fa5]{2,4})"),
+)
+
+
+def _person_names(docs: list[dict]) -> dict[str, set[str]]:
+    """人名实体 → {人名: 出现的 doc_id 集合}。
+
+    交叉验证提纯：只认在 `@姓名：`（会议纪要发言人格式，最高精度）中出现过的名字；
+    提案者/主持模式仅用于补充频次，不引入新名字（实测可滤掉「负责按照」类误报）。
+    """
+    at_re = _NAME_CONTEXT_RES[0]
+    verified: set[str] = set()
+    names: dict[str, set[str]] = {}
+    for d in docs:
+        for rx in _NAME_CONTEXT_RES:
+            for m in rx.finditer(d["text"]):
+                name = m.group(1)
+                names.setdefault(name, set()).add(d["doc_id"])
+                if rx is at_re:
+                    verified.add(name)
+    return {n: ids for n, ids in names.items() if n in verified}
+
+
+def _cross_doc_items(docs: list[dict], llm_cfg: dict) -> list[GoldItem]:
+    """跨 2~9 篇复现的人名 → 聚合题（人名有区分度，泛词与模板词已排除）。"""
+    names = _person_names(docs)
+    candidates = sorted(
+        (n for n, ids in names.items() if 2 <= len(ids) <= 9),
+        key=lambda n: (-len(names[n]), n),
+    )
+    items = []
+    for name in candidates[:8]:
+        ids = sorted(names[name])
+        items.append(
+            GoldItem(
+                id="", type="cross_doc",
+                question=f"关于「{name}」，公司文档里出现过哪些讨论或安排？",
+                expected_answer=f"散见于 {len(ids)} 篇文档，围绕「{name}」有多次记录（聚合题，按检索命中评分）",
+                must_contain=[name],
+                source_doc_ids=ids,
+                refusable=False, source_title="(跨文档)",
+            )
+        )
+    return items
 
 
 def _load_docs(parsed_dir: Path) -> list[dict]:
@@ -142,69 +197,36 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
     return items
 
 
-def _cross_doc_items(docs: list[dict], llm_cfg: dict) -> list[GoldItem]:
-    """找跨 ≥3 篇复现且非常见词的关键词 → 聚合题。"""
-    token_docs: dict[str, set[str]] = {}
-    import jieba
-
-    for d in docs:
-        for tok in set(jieba.cut_for_search(d["text"][:2000])):
-            tok = tok.strip()
-            if len(tok) >= 2 and tok not in _STOPWORDS and not tok.isdigit():
-                token_docs.setdefault(tok, set()).add(d["doc_id"])
-    candidates = [
-        tok for tok, ids in token_docs.items() if 3 <= len(ids) <= 6
-    ]
-    items = []
-    for tok in candidates[:8]:
-        ids = sorted(token_docs[tok])
-        items.append(
-            GoldItem(
-                id="", type="cross_doc",
-                question=f"关于「{tok}」，公司文档里出现过哪些讨论或安排？",
-                expected_answer=f"散见于 {len(ids)} 篇文档，围绕「{tok}」有多次记录（聚合题，按检索命中评分）",
-                must_contain=[tok],
-                source_doc_ids=ids,
-                refusable=False, source_title="(跨文档)",
-            )
-        )
-    return items
-
-
 def _time_items(docs: list[dict]) -> list[GoldItem]:
-    """年份 × 该年文档中的高频实词 → 时间限定题。"""
-    import jieba
-
+    """年份 × 该年内跨 2~5 篇出现的人名 → 时间限定题。"""
     by_year: dict[str, list[dict]] = {}
     for d in docs:
         m = re.search(r"20\d{2}", d["title"])
         if m:
             by_year.setdefault(m.group(0), []).append(d)
+
     items = []
     for year, pool in sorted(by_year.items()):
         if len(pool) < 3:
             continue
-        cnt: Counter = Counter()
-        for d in pool:
-            for tok in set(jieba.cut_for_search(d["text"][:1500])):
-                tok = tok.strip()
-                if len(tok) >= 2 and tok not in _STOPWORDS and not tok.isdigit():
-                    cnt[tok] += 1
-        for tok, _ in cnt.most_common(4):
-            ids = [d["doc_id"] for d in pool if tok in d["text"]][:5]
-            if len(ids) < 2:
-                continue
+        names = _person_names(pool)
+        candidates = sorted(
+            (n for n, ids in names.items() if 2 <= len(ids) <= 5),
+            key=lambda n: (-len(names[n]), n),
+        )
+        for name in candidates[:4]:
+            ids = sorted(names[name])
             items.append(
                 GoldItem(
                     id="", type="time_filter",
-                    question=f"{year}年的文档中，关于「{tok}」有哪些记录？",
-                    expected_answer=f"{year}年语料中「{tok}」相关内容（时间限定题，按检索命中评分）",
-                    must_contain=[tok],
+                    question=f"{year}年的文档中，关于「{name}」有哪些记录？",
+                    expected_answer=f"{year}年语料中「{name}」相关内容（时间限定题，按检索命中评分）",
+                    must_contain=[name],
                     source_doc_ids=ids,
                     refusable=False, source_title=f"({year})",
                 )
             )
-            if len([i for i in items if i.type == "time_filter"]) >= 8:
+            if len(items) >= 8:
                 return items
     return items
 
@@ -229,14 +251,39 @@ def _no_answer_items(docs: list[dict]) -> list[GoldItem]:
     return items
 
 
-def generate(parsed_dir: Path, out_file: Path, llm_cfg: dict, per_doc: int = 2, seed: int = 42) -> dict:
+def generate(
+    parsed_dir: Path,
+    out_file: Path,
+    llm_cfg: dict,
+    per_doc: int = 2,
+    seed: int = 42,
+    programmatic_only: bool = False,
+) -> dict:
+    """生成黄金集。
+
+    programmatic_only=True：保留已有 LLM 题，只重算程序化题型（cross_doc /
+    time_filter / no_answer）——改选词策略时零 LLM 成本（见 PLAN §8 成本控制）。
+    """
     docs = _load_docs(parsed_dir)
     sampled = _sample(docs, per_doc, seed)
-    items: list[GoldItem] = []
 
-    for i, doc in enumerate(sampled):
-        qtype = _PER_DOC_TYPES[i % len(_PER_DOC_TYPES)]
-        items.extend(_gen_for_doc(doc, qtype, llm_cfg))
+    kept: list[GoldItem] = []
+    if programmatic_only:
+        if not out_file.exists():
+            raise FileNotFoundError(f"programmatic_only 需要已有黄金集：{out_file}")
+        existing = json.loads(out_file.read_text(encoding="utf-8"))
+        _PROGRAMMATIC = {"cross_doc", "time_filter", "no_answer"}
+        kept = [
+            GoldItem.model_validate(i)
+            for i in existing["items"]
+            if i["type"] not in _PROGRAMMATIC
+        ]
+
+    items: list[GoldItem] = list(kept)
+    if not programmatic_only:
+        for i, doc in enumerate(sampled):
+            qtype = _PER_DOC_TYPES[i % len(_PER_DOC_TYPES)]
+            items.extend(_gen_for_doc(doc, qtype, llm_cfg))
 
     items.extend(_cross_doc_items(docs, llm_cfg))
     items.extend(_time_items(docs))

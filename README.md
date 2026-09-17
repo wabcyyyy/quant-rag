@@ -17,11 +17,29 @@ uv run pytest          # 测试
 
 ## 状态（对照 PLAN §7 路线图）
 
-- [x] 骨架：配置 / 统一中间表示 / 接入（PDF + doc(x)，含带框表格重建）/ 结构分块 / 画像 CLI
-- [ ] Phase 0：语料画像、表格解析抽查、黄金集 v0
-- [ ] Phase 1：Embed + Qdrant 入库、Hybrid 检索（Dense+Sparse+RRF）、引用问答、第一版 RAGAS
-- [ ] Phase 2：四组消融、元数据过滤、Rerank、元数据全量字段
+- [x] 骨架：配置 / 统一中间表示 / 接入（PDF + doc(x)，含碎化行重建与带框表格重建）/ 结构分块 / 画像 CLI
+- [x] Phase 0：语料画像（1130 份）、表格解析抽查、黄金集 v1（64 条，人名实体构造）
+- [x] Phase 1：入库 1121 篇 / 3856 块、Hybrid 检索（Dense+BM25+RRF）、引用问答、双轨评估闭环
+- [~] Phase 2：消融 #1（纯 Dense vs Hybrid）已完成；cross_doc 聚合检索、Rerank、Faithfulness 优化进行中
 - [ ] Phase 3：全量压测、图片 caption 入库、GraphRAG 跨文档
+
+## 评估结果（黄金集 v1 · 64 条 · 1121 篇语料）
+
+消融 #1：纯 Dense vs Hybrid（Dense+BM25+RRF）
+
+| 指标 | 纯 Dense | Hybrid（默认） |
+|------|---------|---------------|
+| Recall@5 | 0.667 | **0.702～0.719** |
+| Recall@8 | 0.754 | **0.807** |
+| MRR | 0.597 | **0.602～0.612** |
+
+> 区间为两次独立运行结果：RRF 并列分数的打破顺序带来 ±1.7pt 波动，
+> 因此所有结论只按相对变化读（PLAN §5.3 评估可信度口径）。
+
+分题型（Recall@8，Hybrid）：fact 1.00 · open_discussion 1.00 · decision 0.88 ·
+term 0.83 · time_filter 0.57 · **cross_doc 0.38（当前瓶颈，待做聚合检索）**
+
+回答质量（Hybrid）：包含匹配 0.82 · 拒答正确率 1.00 · 引用有效率 1.00 · RAGAS Faithfulness 0.62
 
 ## 注意
 
