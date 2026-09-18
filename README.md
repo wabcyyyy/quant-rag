@@ -69,6 +69,25 @@ uv run doc-rag query --stream "问题"           # CLI 流式输出
 # FastAPI：POST /query/stream（SSE 事件：rewrite / delta / citations / done）
 ```
 
+## 示例语料（clone 即可端到端体验）
+
+真实语料不入库；`data/sample_raw/` 附带一套**虚构公司「云帆科技」的合成会议纪要**
+（10 篇 PDF，由 `scripts/make_sample_corpus.py` 确定性生成，内容与黄金集样例
+`golden_sample.json` 的 doc_id 互相咬合）：
+
+```bash
+uv run doc-rag ingest  --raw-dir data/sample_raw --parsed-dir data/sample_parsed \
+                       --kb doc_rag_sample --recreate
+uv run doc-rag eval    --kb doc_rag_sample --gold data/eval/golden_sample.json \
+                       --rewrite --rerank --fresh-answers
+uv run --extra demo doc-rag demo --kb doc_rag_sample   # 演示页连示例库
+```
+
+实测（10 条全真实调用，成本 ≈¥0.02）：Recall/MRR/nDCG、包含匹配、拒答、引用全部 1.0，
+端到端 p95 ≈4~5s。注意：**10 篇小库满分只背书「管线正确、eval 判分口径可跑通」**，
+真实语料上的难度与结论看下方黄金集 v2 各节；`--parsed-dir` 让示例解析产物与公司语料
+目录隔离，避免把全量中间 JSON 误灌进示例 collection。
+
 ## 多源接入（统一中间表示）
 
 PDF 与 docx 归一到同一套 block 模型，下游分块/入库只认它，不认来源：
@@ -175,11 +194,10 @@ PDF 与 docx 归一到同一套 block 模型，下游分块/入库只认它，�
 
 > 本地响应缓存使重复评估近乎零成本（实测命中 90%）：同配置重跑不重复付费。
 
-**评估集可复现性**：真实黄金集含公司内容，不入库；`data/eval/golden_sample.json` 提供一份
-**脱敏合成的格式模板**（虚构公司内容，10 条覆盖全部 7 题型），字段契约见
-`src/doc_rag/eval/schema.py`，构造脚本与口径见 `doc-rag gen-gold` 与 PLAN §5.3。
-`doc-rag eval --gold data/eval/golden_sample.json …` 即可消费同构数据（source_doc_ids
-为示意占位，自建语料时替换为真实入库的 doc_id）。
+**评估集可复现性**：真实黄金集含公司内容，不入库；`data/eval/golden_sample.json` 提供
+**脱敏合成的可跑通样例**（虚构公司内容，10 条覆盖全部 7 题型，source_doc_ids 指向示例
+语料的真实 doc_id，见上节），字段契约见 `src/doc_rag/eval/schema.py`，构造脚本与口径见
+`doc-rag gen-gold` 与 PLAN §5.3，`--gold` 即可消费。
 
 ## 使用示例（带引用与拒答）
 

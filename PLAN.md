@@ -331,8 +331,11 @@ NLI 再据此判否。这是修正口径后残留的主要噪声源。
 
 **黄金集的合规入库（2026-09-18）**：真实黄金集（`gold.json`，v2 72 条）含公司内容不入库；
 格式模板以**脱敏合成样例**入库（`data/eval/golden_sample.json`，虚构公司内容，10 条覆盖
-7 题型，`source_doc_ids` 为示意占位）——「公开构造过程」由两层落地：构造脚本（`gen-gold`）
-+ 格式模板。字段契约见 `eval/schema.py`。
+7 题型）——「公开构造过程」由两层落地：构造脚本（`gen-gold`）+ 格式模板。字段契约见
+`eval/schema.py`。同日补齐配套：10 篇合成会议纪要入库（`data/sample_raw/`，生成脚本
+`scripts/make_sample_corpus.py`，确定性生成 + 域外词断言），样例集 source_doc_ids 与其
+真实 doc_id 咬合，**clone 后即可端到端复现 ingest → eval → demo**（实测 10 条全指标 1.0，
+≈¥0.02；`ingest --parsed-dir` 同步补齐，防止示例解析产物混入公司语料目录导致全量误灌）。
 
 复现命令（结果 JSON 含公司内容，按合规不入库，只留命令）：
 

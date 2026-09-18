@@ -149,6 +149,10 @@ def profile(
 @app.command()
 def ingest(
     raw_dir: Annotated[Path | None, typer.Option(help="语料目录")] = None,
+    parsed_dir: Annotated[
+        Path | None,
+        typer.Option(help="中间 JSON 落盘目录（示例语料务必与公司语料分开，避免把全量入库）"),
+    ] = None,
     kb: Annotated[str | None, typer.Option(help="Qdrant collection 名，默认取配置")] = None,
     parse_only: Annotated[bool, typer.Option(help="只解析落盘，不向量化入库")] = False,
     recreate: Annotated[bool, typer.Option(help="先删除并重建 collection（清空重灌）")] = False,
@@ -161,7 +165,7 @@ def ingest(
     """全链路入库：解析 → 分块 → LLM 元数据 → Embed → Qdrant。"""
     cfg = load_config()
     raw = raw_dir or Path(cfg["paths"]["raw"])
-    parsed = Path(cfg["paths"]["parsed"])
+    parsed = parsed_dir or Path(cfg["paths"]["parsed"])
 
     if index_only:
         typer.echo(f"跳过解析，直接入库已有中间 JSON（{parsed}）")

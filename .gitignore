@@ -14,6 +14,8 @@ data/raw/*
 data/parsed/*
 !data/raw/.gitkeep
 !data/parsed/.gitkeep
+# 示例语料的解析产物不入库（示例 PDF 本体 data/sample_raw/ 入库）
+data/sample_parsed/
 # 评估黄金集含公司内容，默认不入库；如需版本管理放私有仓
 data/eval/*.json
 # 例外：脱敏合成的格式模板（虚构公司内容，不含真实语料），见 README
