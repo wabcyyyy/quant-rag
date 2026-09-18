@@ -32,6 +32,8 @@ data/eval/*.json
 
 # 面试准备（个人求职叙事）——只留本地，不入库不上传（README 保持纯工程文档）
 docs/
+!docs/
+!docs/how-it-works.md
 
 # ZCode 会话产物
 .zcode/
