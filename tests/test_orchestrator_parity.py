@@ -1,4 +1,4 @@
-"""四条问答路径必须走同一条管线（W1 的回归护栏）。
+"""五条问答入口必须走同一条管线（W1 的回归护栏）。
 
 背景：这条链此前在 6 处内联重复，并且已经漂移成——FastAPI 两个端点漏掉重排、
 `/query` 还漏掉 `max_contexts` 截断；README 的头条数字测的是「改写 + 重排 + 截断」，
@@ -7,6 +7,11 @@
 这里用「送进 LLM 的 prompt 必须逐字相同」来锁死：任何一条路径少拼一个环节，
 prompt 就会与其他路径不一致。另两条护栏是重排调用次数与上下文块数——它们能在
 prompt 相同的情况下仍然悄悄漂移（比如顺序不同但内容相同）。
+
+CLI 原本**不在**这条护栏里（helper 名为 `_drive_all_four`，PLAN §5.4 W1 却写着「五条入口
+含 CLI」——2026-09-20 核对时改正）。它确实复用同一个 `Orchestrator`，但正因为只是「确实」，
+少传一个参数、多带一个默认值都不会有任何测试报警，所以这里通过 `CliRunner` 驱动真正的
+命令行入口（连 typer 的参数解析一起过），CLI 的默认与 `--stream` 两种形态各算一次调用。
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import re
 from typing import ClassVar
 
 import pytest
+from fastapi.testclient import TestClient
 
 from doc_rag.api import demo as demo_mod
 from doc_rag.api import main as api_main
@@ -106,7 +112,7 @@ def prompt_spy(monkeypatch):
     """拦在 llm 层：记录真实 Synthesizer 拼出来的 prompt，而不是替身的答案。
 
     改写阶段也走同一个 chat_timed，因此必须按 system_prompt 分流——只记答案侧的
-    调用（否则「四条路径各一次合成」会数成八次），且四条路径共用同一份改写结果，
+    调用（否则「六次合成」会数成十二次），且各条路径共用同一份改写结果，
     parity 比较才不被改写抖动污染。
     """
     from doc_rag.retrieve.rewrite_llm import SYSTEM_REWRITE
@@ -155,17 +161,8 @@ def wired(monkeypatch, prompt_spy):
     return prompt_spy
 
 
-def _drive_all_four(monkeypatch, tmp_path, cfg):
-    """跑 /query、/query/stream、演示页、eval 单条，各自触发一次合成。"""
-    from fastapi.testclient import TestClient
-
-    monkeypatch.setattr(api_main, "_orchestrator", lambda: Orchestrator(cfg))
-    client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
-
-    client.post("/query", json={"question": QUESTION})
-    client.post("/query/stream", json={"question": QUESTION})
-    list(demo_mod.render_answer(Orchestrator(cfg), QUESTION))
-
+def _drive_eval_one(monkeypatch, tmp_path, cfg):
+    """eval 单条：一次合成。"""
     gold = tmp_path / "gold.json"
     gold.write_text(
         json.dumps(
@@ -193,25 +190,56 @@ def _drive_all_four(monkeypatch, tmp_path, cfg):
     runner.evaluate(gold, cfg=cfg, use_rewrite=True, use_rerank=True)
 
 
-def test_all_four_paths_send_identical_prompt(monkeypatch, tmp_path, wired):
-    cfg = _cfg()
-    _drive_all_four(monkeypatch, tmp_path, cfg)
+# 五条入口，CLI 的两种形态各一次 → 六次合成调用
+ENTRIES: tuple[str, ...] = (
+    "/query",
+    "/query/stream",
+    "演示页",
+    "eval 单条",
+    "doc-rag query",
+    "doc-rag query --stream",
+)
 
-    assert len(wired) == 4, "四条路径各自应且只应触发一次合成调用"
+
+def _drive_all_entries(monkeypatch, tmp_path, cfg):
+    """把五条入口各跑一遍，各自触发一次合成；返回与调用顺序同名的清单。"""
+    from typer.testing import CliRunner
+
+    from doc_rag import cli as cli_mod
+
+    monkeypatch.setattr(api_main, "_orchestrator", lambda: Orchestrator(cfg))
+    client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
+
+    client.post("/query", json={"question": QUESTION})
+    client.post("/query/stream", json={"question": QUESTION})
+    list(demo_mod.render_answer(Orchestrator(cfg), QUESTION))
+    _drive_eval_one(monkeypatch, tmp_path, cfg)
+
+    monkeypatch.setattr(cli_mod, "load_config", lambda *a, **k: cfg)
+    for args in (["query", QUESTION], ["query", QUESTION, "--stream"]):
+        res = CliRunner().invoke(cli_mod.app, args)
+        assert res.exit_code == 0, f"{args} 退出码 {res.exit_code}：{res.output}"
+
+    return list(ENTRIES)
+
+
+def test_every_entry_sends_identical_prompt(monkeypatch, tmp_path, wired):
+    cfg = _cfg()
+    entries = _drive_all_entries(monkeypatch, tmp_path, cfg)
+
+    assert len(wired) == len(entries) == 6, "五条入口各应且只应触发一次合成调用"
     users = [p["user"] for p in wired]
-    assert users[0] == users[1] == users[2] == users[3]
+    assert users == [users[0]] * len(users), f"prompt 漂移：{entries}"
     assert len({p["system"] for p in wired}) == 1
     # 重排：cfg.rerank.enabled 为真时没有任何一条路径可以跳过它
-    assert SpyReranker.calls == 4
-    # 截断：max_contexts 对四条路径同样生效
-    for user in users:
-        assert len(_CTX_HEAD.findall(user)) == MAX_CONTEXTS
+    assert SpyReranker.calls == len(entries)
+    # 截断：max_contexts 对每条入口同样生效
+    for entry, user in zip(entries, users, strict=True):
+        assert len(_CTX_HEAD.findall(user)) == MAX_CONTEXTS, entry
 
 
 def test_kb_param_does_not_stick_across_requests(monkeypatch, wired):
     """回归：改造前端点用 `retriever.collection = body.kb` 改共享单例，并发会串库。"""
-    from fastapi.testclient import TestClient
-
     cfg = _cfg()
     monkeypatch.setattr(api_main, "_orchestrator", lambda: Orchestrator(cfg))
     client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})

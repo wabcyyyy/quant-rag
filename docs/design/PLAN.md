@@ -1010,7 +1010,7 @@ Faithfulness 差值从此不再有结论资格。
   改的是 `lru_cache` 单例，并发会串库）。
   > ⚠️ 本条原文把 CLI 也算成第五条入口，与 README「四条路径共用它」自相矛盾。2026-09-20 核对
   > helper `_drive_all_four` 后改正：CLI 确实走同一个 `Orchestrator`（`cli.py:537`），但
-  > **没有任何 parity 断言覆盖它**。把矩阵补成五条是 §5.5 的 P1 任务之一。
+  > **没有任何 parity 断言覆盖它**。矩阵已于 2026-09-20 补成五条（见 §5.5 末「P1 进度」）。
 - **W2 配置诚实化**：删掉 5 个没人读的键（`parent_expand`、`rrf_k`、`rerank_top_n`、
   `embedding.sparse`、`metadata_extraction.fields`）。新增
   `tests/test_config_keys_are_wired.py`：解析 default.yaml 的叶子键，逐个断言 src 里
@@ -1137,7 +1137,8 @@ parity 扩展这四件是两条路共用的，不会白。
 **草案转入本节时的代码复核改掉了 5 处**（草案文字与仓库不符，一律以下面这版为准）：
 
 1. 草案 §4 的「五入口一致性」**不成立**：parity helper 名为 `_drive_all_four`，覆盖 `/query`、
-   `/query/stream`、演示页、eval **四条**；CLI 走同一个 `Orchestrator` 但无断言（§5.4 W1 已同步改正）。
+   `/query/stream`、演示页、eval **四条**；CLI 走同一个 `Orchestrator` 但无断言（§5.4 W1 已同步改正，
+   断言本身已随 P1 补齐 —— 见本节末「P1 进度」）。
 2. 答案轨护栏的缺口比草案说的小、但位置更精确：`n_contexts` **已经在** eval 的 `items[]`
    （`eval/runner.py:335`）与 summary 里，缺的只有 **RAGAS 轨的 `per_item`**（`runner.py:889-900`
    只写 `{id, type, faithfulness}`），且 `compare.py:166` 给 RAGAS 臂的是 `aux={}` →
@@ -1179,6 +1180,15 @@ parity 扩展这四件是两条路共用的，不会白。
 **基线口径（延续「新旧不混用」）**：v3 与 agent 臂同现有 72 条**不同黄金集版本、不同 prompt 版本、
 不同 policy** → 只并列不比较，README 头条仍是单发路径。**每一轮 agent 请求必须落 trace，judge 重放
 只读 trace，缺记录值就拒绝重放** —— 与改写侧 `plan_override` 同一条纪律（§5.4 W3）。
+
+**P1 进度（2026-09-20）：parity 矩阵已补成五条入口**。`_drive_all_entries` 驱动 `/query`、
+`/query/stream`、演示页、eval 单条、`doc-rag query`、`doc-rag query --stream` 共**六次**合成调用
+（CLI 走 `CliRunner` 的真入口，连 typer 的参数解析一起过），断言逐字同 prompt / 重排次数 /
+`max_contexts` 截断三项对六次同样成立。**结果是今天没有漂移** —— 这条护栏的价值在于以后不会悄悄有。
+断言的牙齿用正对照验过：给 `cli.query` 注入一处 `use_rerank` 漂移 → 报 `SpyReranker.calls 4 != 6`。
+`mode`（single / agent）那一维要等 `agent.py` 才有对象，不预先加空参数。
+顺带一条实测发现：`answer_stream` 不接受 `plan_override` 这条不对称**今天无人使用**（eval 重放走
+`answer`），所以不加投机参数；但 agent 的 trace 重放一旦要覆盖流式入口，必须先收这条。
 
 ## 6. 交付物与复现命令
 

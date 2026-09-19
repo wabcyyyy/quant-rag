@@ -102,11 +102,14 @@ trace = {
 是抄了 PLAN §5.4 W1 的同一处笔误（README 的「四条」一直是对的），§5.4 已同步改正。
 agent 必须扩这条：
 
-1. 先补 CLI 成第五条，再带 `mode`（single / agent）参数，parity 矩阵在两个 mode 下各跑一遍；
+1. ✅ 已补（2026-09-20）：CLI 的默认与 `--stream` 两种形态各算一次，五条入口共**六次**合成调用，
+   走 `CliRunner` 的真入口（连 typer 参数解析一起过）；今天无漂移，断言的牙齿用正对照验过。
+   再把 `mode`（single / agent）做成参数，parity 矩阵在两个 mode 下各跑一遍；
 2. agent mode 追加断言：**trace 步数、每步 action 集合、LLM 调用次数、token 合计**五入口逐项相等。
 3. 已知障碍：`Orchestrator.answer_stream` 不接受 `plan_override`（只有 `answer` 接受），
-   流式路径无法重放已记录的中间产物 —— 加 agent 之前这条不对称要先收，否则第五条入口的
-   trace 与另四条不同源。
+   流式路径无法重放已记录的中间产物。2026-09-20 实测：**这条不对称今天无人使用**（eval 重放走
+   `answer`），所以先不加投机参数；但 agent 的 trace 重放一旦要覆盖流式入口就得先收。
+   CLI 已经进矩阵（五条入口共六次合成调用，见 PLAN §5.5「P1 进度」）。
 
 这是 W1 那类漂移（「文档里的头条数字描述的是一条没有交付入口在跑的管线」）目前唯一的防线。
 
