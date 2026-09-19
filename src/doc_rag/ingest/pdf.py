@@ -1,8 +1,7 @@
 """PDF 快通道：PyMuPDF 抽取 born-digital 文本层 + find_tables 重建带框表格。
 
 标题用字号启发识别（span 字号 ≥ 正文中位数 × 1.15 且短行，v1 层级粒度粗）。
-无框线表格会退化为分段文本——质量由画像统计 + 抽样人审把关（PLAN Phase 0）；
-不足率过高才触发飞书 OpenAPI 路线（PLAN §1 面试表）。
+无框线表格会退化为分段文本——质量由画像统计 + 抽样人审把关（PLAN Phase 0）。
 """
 
 from __future__ import annotations
@@ -27,8 +26,10 @@ def _merge_lines(lines: list[dict]) -> str:
     buf = ""
     prev_y1: float | None = None
     for line in lines:
-        text = "".join(span["text"] for span in line.get("spans", [])).strip().replace(
-            "\u200b", ""
+        text = (
+            "".join(span["text"] for span in line.get("spans", []))
+            .strip()
+            .replace("\u200b", "")
         )
         if not text:
             continue
@@ -66,7 +67,8 @@ def _overlaps_half(block_bbox: list[float], table_bbox: tuple[float, ...]) -> bo
 
 def _table_markdown(rows: list[list[str | None]]) -> str:
     return "\n".join(
-        "| " + " | ".join((c or "").replace("\n", " ") for c in row) + " |" for row in rows
+        "| " + " | ".join((c or "").replace("\n", " ") for c in row) + " |"
+        for row in rows
     )
 
 
@@ -144,7 +146,9 @@ def extract_pdf(path: Path) -> IntermediateDoc:
 
         body_median = statistics.median(body_sizes) if body_sizes else 10.0
         blocks: list[Block] = []
-        for _, _, _, block, max_size in sorted(entries, key=lambda e: (e[0], e[1], e[2])):
+        for _, _, _, block, max_size in sorted(
+            entries, key=lambda e: (e[0], e[1], e[2])
+        ):
             if (
                 block.type == "paragraph"
                 and max_size >= body_median * _HEADING_SIZE_RATIO

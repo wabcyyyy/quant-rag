@@ -1,0 +1,179 @@
+{
+  "purpose": "查询改写的泛化门禁集：措辞刻意不重复黄金集模板，用来暴露「规则只认评测集原句」这类过拟合。内容全部指向 data/sample_raw 的虚构语料（云帆科技），不含公司内容。",
+  "gates": {
+    "aggregate_recall_min": 0.8,
+    "single_fact_false_trigger_max": 0.1
+  },
+  "items": [
+    {
+      "id": "agg-01",
+      "expect": "aggregate",
+      "question": "列一下客服系统相关的讨论",
+      "entity": "客服系统"
+    },
+    {
+      "id": "agg-02",
+      "expect": "aggregate",
+      "question": "仓储系统这件事都被提起过几回",
+      "entity": "仓储系统"
+    },
+    {
+      "id": "agg-03",
+      "expect": "aggregate",
+      "question": "汇总一下财务系统的安排",
+      "entity": "财务系统"
+    },
+    {
+      "id": "agg-04",
+      "expect": "aggregate",
+      "question": "新仓库的建设都涉及哪些部门",
+      "entity": "新仓库"
+    },
+    {
+      "id": "agg-05",
+      "expect": "aggregate",
+      "question": "关于供应商协同平台，都说过些什么",
+      "entity": "供应商协同平台"
+    },
+    {
+      "id": "agg-06",
+      "expect": "aggregate",
+      "question": "异地灾备机房选址的整个经过",
+      "entity": "异地灾备机房选址"
+    },
+    {
+      "id": "agg-07",
+      "expect": "aggregate",
+      "question": "员工食堂承包商都换过谁",
+      "entity": "员工食堂承包商"
+    },
+    {
+      "id": "agg-08",
+      "expect": "aggregate",
+      "question": "采购审批权限的历次调整",
+      "entity": "采购审批权限"
+    },
+    {
+      "id": "agg-09",
+      "expect": "aggregate",
+      "question": "差旅报销制度都改过哪些地方",
+      "entity": "差旅报销制度"
+    },
+    {
+      "id": "agg-10",
+      "expect": "aggregate",
+      "question": "安全培训都被安排过哪些内容",
+      "entity": "安全培训"
+    },
+    {
+      "id": "aggyear-01",
+      "expect": "aggregate_year",
+      "year": 2025,
+      "question": "2025 年异地灾备机房选址有过哪些讨论？"
+    },
+    {
+      "id": "aggyear-02",
+      "expect": "aggregate_year",
+      "year": 2026,
+      "question": "列一下 2026 年关于客服系统的讨论"
+    },
+    {
+      "id": "aggyear-03",
+      "expect": "aggregate_year",
+      "year": 2025,
+      "question": "去年到今年，2025 年度仓储系统的进展"
+    },
+    {
+      "id": "aggyear-04",
+      "expect": "aggregate_year",
+      "year": 2026,
+      "question": "2026 年财务系统都被提过什么"
+    },
+    {
+      "id": "aggyear-05",
+      "expect": "aggregate_year",
+      "year": 2025,
+      "question": "把 2025 年所有涉及新仓库的记录整理出来"
+    },
+    {
+      "id": "aggyear-06",
+      "expect": "aggregate_year",
+      "year": 2026,
+      "question": "2026 年供应商协同方面都做了什么"
+    },
+    {
+      "id": "aggyear-07",
+      "expect": "aggregate_year",
+      "year": 2025,
+      "question": "2025 年 WMS 选型都被提起过几次"
+    },
+    {
+      "id": "aggyear-08",
+      "expect": "aggregate_year",
+      "year": 2026,
+      "question": "2026 年采购审批的历次变动"
+    },
+    {
+      "id": "aggyear-09",
+      "expect": "aggregate_year",
+      "year": 2025,
+      "question": "2025 年差旅报销都调过什么"
+    },
+    {
+      "id": "aggyear-10",
+      "expect": "aggregate_year",
+      "year": 2026,
+      "question": "汇总 2026 年异地灾备的讨论"
+    },
+    {
+      "id": "fact-01",
+      "expect": "single_fact",
+      "question": "客服系统升级的预算是多少？"
+    },
+    {
+      "id": "fact-02",
+      "expect": "single_fact",
+      "question": "仓储系统的建设工作由哪个部门牵头？"
+    },
+    {
+      "id": "fact-03",
+      "expect": "single_fact",
+      "question": "财务系统二期要把月结对账周期压缩到几个工作日？"
+    },
+    {
+      "id": "fact-04",
+      "expect": "single_fact",
+      "question": "办公会上关于异地灾备机房选址最终定了什么？"
+    },
+    {
+      "id": "fact-05",
+      "expect": "single_fact",
+      "question": "公司内部把供应商协同相关的系统叫什么名字？"
+    },
+    {
+      "id": "fact-06",
+      "expect": "single_fact",
+      "question": "公司的差旅报销制度文件叫什么名称？"
+    },
+    {
+      "id": "fact-07",
+      "expect": "single_fact",
+      "question": "关于供应商年度评审，公司定下了什么安排？"
+    },
+    {
+      "id": "fact-08",
+      "expect": "single_fact",
+      "question": "员工食堂的承包商是哪家公司？"
+    },
+    {
+      "id": "fact-09",
+      "expect": "single_fact",
+      "question": "2026 年办公会第 9 周会议纪要里定的消防验收标准是什么？"
+    },
+    {
+      "id": "fact-10",
+      "expect": "single_fact",
+      "question": "公司在区块链存证方面有什么制度或布局？"
+    }
+  ]
+}

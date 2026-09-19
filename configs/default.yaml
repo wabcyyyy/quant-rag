@@ -5,24 +5,19 @@ paths:
   parsed: data/parsed
   eval: data/eval
 
-feishu:
-  enabled: false # 待企业自建应用权限（PLAN §9 行动项 2）
-  app_id: ""
-  app_secret: ""
-  root_folder_token: ""
-
 embedding:
-  # BGE-M3 via OpenAI 兼容 API（如 SiliconFlow）；开工首日实测是否返回 sparse 权重（PLAN §8）
+  # BGE-M3 via OpenAI 兼容 API（如 SiliconFlow）。实测响应不含 learned-sparse 字段
+  # （`doc-rag check` 会打印这个结论），所以稀疏路走 Qdrant 内置 BM25；
+  # 这里不留 `sparse` 开关——没有代码读它，留着就是配置在宣称一个不存在的能力。
   base_url: env:DOC_RAG_EMBEDDING_BASE_URL
   api_key: env:DOC_RAG_EMBEDDING_API_KEY
   model: BAAI/bge-m3
   dense_dim: 1024
-  sparse: true
 
 llm:
   base_url: env:DOC_RAG_LLM_BASE_URL
   api_key: env:DOC_RAG_LLM_API_KEY
-  model: env:DOC_RAG_LLM_MODEL # judge 与合成同源（PLAN §5.3 评估可信度口径）
+  model: env:DOC_RAG_LLM_MODEL # 默认与合成同源；judge 可单指一家（PLAN §5.3「judge 自偏」）
   temperature: 0.0
   cache: true # 本地响应缓存（.cache/llm_cache.sqlite）：同 prompt 重跑零成本
   # 合成侧的思考开关。默认空 = 保持现状（开思考，质量优先）。
@@ -36,39 +31,83 @@ llm:
   # 忠实度 −6~−21pt，必须保留思考。不配则回落到上面的全局值。
   # 推荐组合：全局留空（其余题型保质量）+ 此处设 none（聚合题砍 30s 级尾部）。
   reasoning_effort_aggregate: env:DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE
-  # OpenRouter 建议带归因头（可选）；换回 DeepSeek 官方时删掉本段
-  headers:
-    HTTP-Referer: https://github.com/wabcyyyy/quant-rag
-    X-Title: doc-rag
+  # 归因头只有 OpenRouter 需要，而默认端点是 DeepSeek 官方——所以这里不放实例值，
+  # 留着就是每次请求往官方 API 多带一个 GitHub 地址。换 OpenRouter 时自行加
+  # `headers: {HTTP-Referer: <你的仓库>, X-Title: doc-rag}`：整棵子树原样透传给 SDK，
+  # 且改写侧换供应商时会主动丢掉它（见 retrieve/rewrite_llm.py 与 test_rewrite_llm）。
 
 qdrant:
   url: http://localhost:6333
   collection: doc_rag_demo
 
+api:
+  # FastAPI 鉴权令牌。空 = /query 与 /query/stream 一律 503（拒绝服务而不是裸奔）。
+  auth_token: env:DOC_RAG_API_TOKEN
+  # kb 参数的白名单。不做白名单等于把「同一 Qdrant 实例上的任意 collection」
+  # 暴露给调用方——改造前 `retriever.collection = body.kb` 连这个边界都没有。
+  allowed_collections: [doc_rag_demo, doc_rag_sample]
+  # 每个令牌每分钟允许的问答次数（进程内滑动窗口）。推理型模型单请求可占住
+  # 线程池槽位到 180s，没限流时几个慢请求就能把服务拖死。0 = 不限流。
+  rate_limit_rpm: 30
+  # CORS 有意不开：这是个带令牌的知识库接口，浏览器直连只会把令牌摊到前端。
+  # 要做 Web 界面就走同源反向代理，或让 Gradio 演示页承担交互层。
+
 retrieval:
   k_dense: 20
   k_bm25: 20
-  rrf_k: 60 # RRF 平滑常数（当前由 Qdrant 服务端实现；留作调参备忘）
   fusion_limit: 12 # 融合后送下游（Rerank/合成）的块数
   aggregate_pool: 50 # 聚合检索的候选池
   aggregate_top_n: 25 # 聚合题自动放宽后的预算（实测覆盖率随预算单调上升）
   max_contexts: 10 # 送入 LLM 的上下文块数上限（控制输入 token；重排后通常更少）
-  rerank_top_n: 6
-  parent_expand: true
+
+rewrite:
+  # 查询改写（LLM 版）参数。关/开由调用方的 --rewrite / --no-rewrite 决定，
+  # 这里不再放第二个开关（两个真值来源迟早互相打脸）。
+  temperature: 0.0
+  # 改写是意图分类，不需要思考：推理型模型会把输出预算几乎全花在看不见的
+  # reasoning token 上（同 judge 的实测结论），而它现在在每次请求的关键路径上。
+  reasoning_effort: none
+  # ── 关键路径预算（与合成侧分开的唯一理由）───────────────────────────────
+  # 合成侧是「180s 超时 × 4 次重试」——给能生成几十秒的聚合答案用的。照搬到一次
+  # 分类上，最坏就是 180+2+180+4+180+8+180 ≈ 12 分钟的等待能力，而它失败本来
+  # 就该退化成「不改写」。
+  # 实测改写延迟（deepseek-flash · 关思考 · 关缓存 · 4 轮各 n=30）：
+  #   p50 632 / 643 / 687 / 817ms · p95 0.84~1.15s · max 1.31s
+  # 5s = 观测最大值的 4 倍余量；两次尝试最坏 5+2+5=12s，之后退化并计数。
+  timeout_s: 5
+  max_attempts: 2
+  # ── 改写模型可以和合成模型不同源（留空 = 继承 llm 那一份）────────────────
+  # 2026-09-19 实测过「换更小/更近的模型砍延迟」：同 30 条泛化门禁题、关缓存
+  # （延迟列为单次观测，deepseek-flash 另有两轮 = p50 687 / 632ms）：
+  #   deepseek-flash      p50 643ms · p95 1.02s · recall 0.95（3 轮一致）· 误触发 0.10
+  #   Qwen3-30B-A3B-Inst  p50 1010ms · p95 3.21s · recall 1.00 · 误触发 0.20
+  #   Qwen2.5-7B-Instruct p50 755ms · p95 1.93s · recall 1.00 · 误触发 0.20
+  #   Qwen3.5-4B          单次 21~46s（reasoning_effort=none 对它无效，照样思考）
+  # 结论：更小不等于更快，DeepSeek 官方也没有比 flash 更小的档（只有 v4-pro）；
+  # 换模型会把延迟推到 1.2~1.6 倍、误触发翻倍，所以默认不换。这三个键留着，
+  # 是因为「改写花延迟预算、合成花质量预算」这个拆分本身成立——要换就得连着
+  # `doc-rag check-rewrite` 的门禁一起量，门禁会打印模型名和延迟。
+  model: ""
+  base_url: ""
+  api_key: ""
 
 rerank:
   enabled: true
   base_url: env:DOC_RAG_EMBEDDING_BASE_URL # SiliconFlow 同源
   api_key: env:DOC_RAG_EMBEDDING_API_KEY
   model: BAAI/bge-reranker-v2-m3
-  top_n: 6 # 重排后送进合成的块数（削减上下文噪声 → Faithfulness）
+  # 送进合成的块数上限。**只是上下文预算**：重排现在返回全量重排清单，
+  # 检索指标（Hit@k / MRR / nDCG / 覆盖率）在那份完整清单上算，两臂才等长可比。
+  # 它以前兼做清单截断，于是「有重排」臂在 6 条上算指标、对照臂在 8 条上算。
+  top_n: 6
 
 metadata_extraction:
   # LLM 元数据抽取的总开关（index_parsed 缺省时读这里）。
   # 保持 false：这是 1 次/文档 = 1130 次调用的最大成本单点（PLAN §8），
   # 文件名信号已覆盖日期/大类。要用必须显式 `ingest --llm-meta` 或改这里。
   enabled: false
-  fields: [date, meeting_type, attendees, topics, decisions]
+  # 抽取字段固定为 prompts.METADATA_EXTRACTION 里那五个；不在这里列一遍，
+  # 否则改提示词时会出现「配置说抽 6 个、提示词只抽 5 个」的第二份事实来源。
 
 eval:
   gold_file: data/eval/gold.json
@@ -79,3 +118,16 @@ eval:
     # 关掉 judge 的思考：拆陈述/逐条判定不需要推理，但推理型模型会把输出预算的
     # 97% 花在看不见的 reasoning token 上（实测单次 1554 → 79）。同模型、不改 judge 身份。
     reasoning_effort: none
+    # ── judge 可以和生成不同源（留空 = 继承 llm 那一份）──────────────────────
+    # 默认同源是省配置的取舍，但它意味着「LLM 打分」这条轨上没有任何独立视角。
+    # `doc-rag audit-refusals` 支持换到这里，用来回答「换个 judge 结论会不会翻」；
+    # 实测结果与结论见 PLAN §5.3「judge 自偏」。**换 judge 就是换度量身份**：
+    # 只有同一批落盘答案上的判读差异可比，跨 judge 的绝对分数不可混用。
+    model: env:DOC_RAG_JUDGE_MODEL # 留空 = 继承 llm.model（同源判分）
+    base_url: env:DOC_RAG_JUDGE_BASE_URL # 留空 = 继承 llm.base_url
+    api_key: env:DOC_RAG_JUDGE_API_KEY # 指向 embedding 那家时留空即可（同账号 key 复用，见 eval/judge.py）
+    timeout_s: 180  # 判分不卡在关键路径上，但也不该继承合成侧的 180s×4 次重试
+    # 180 不是拍脑袋：跨供应商复判（SiliconFlow Qwen3-30B）实测 60s 会在 8 并发下
+    # 掐断最长上下文那批条目（time_filter 12 条里 6 条超时），缺失集中在同一题型 →
+    # 均值就被幸存者拉高。放宽到 180 补齐之后再看结论（PLAN §5.3「judge 自偏」）。
+    max_attempts: 2

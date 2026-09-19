@@ -15,6 +15,7 @@ from doc_rag.eval import runner
 from doc_rag.generate import llm as llm_mod
 from doc_rag.generate import prompts
 from doc_rag.generate.synthesizer import Synthesizer
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 
 def test_default_version_is_tightened_and_unchanged():
@@ -63,7 +64,9 @@ def _capture_system_prompt(monkeypatch):
 
 def test_synthesizer_default_uses_tightened(monkeypatch):
     seen = _capture_system_prompt(monkeypatch)
-    Synthesizer({"model": "m"}).answer("q", [{"no": 1, "text": "t", "doc": "d", "page": 1}])
+    Synthesizer({"model": "m"}).answer(
+        "q", [{"no": 1, "text": "t", "doc": "d", "page": 1}]
+    )
     assert seen[0] == prompts.SYSTEM_ANSWER
 
 
@@ -98,7 +101,9 @@ def test_prompt_version_changes_cache_key(monkeypatch):
     monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
     base_cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
     llm_mod.chat_timed(base_cfg, "问题", system_prompt=prompts.SYSTEM_ANSWER)
-    llm_mod.chat_timed(base_cfg, "问题", system_prompt=prompts.ANSWER_PROMPTS["baseline"])
+    llm_mod.chat_timed(
+        base_cfg, "问题", system_prompt=prompts.ANSWER_PROMPTS["baseline"]
+    )
     assert len(keys) == 2 and keys[0] != keys[1]
 
 
@@ -107,18 +112,39 @@ def test_prompt_version_changes_cache_key(monkeypatch):
 
 def _gold_one_item(tmp_path):
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     return gold
 
 
 def _mock_pipeline(monkeypatch):
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "p"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "p",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "费用67元 [1]"
     synthesizer.last_meta = {"ms": 1.0, "cached": False, "model": "m"}

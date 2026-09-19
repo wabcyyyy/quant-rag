@@ -50,26 +50,125 @@ _NO_ANSWER_CANDIDATES = [
     # 反例：问「员工持股计划」——关键词确实不存在，但语料有 ESOP/股权激励内容，
     # 题目实质可答；问「岗位职级体系」同理（语料有职级表）。
     # 故优先取公司内部会议纪要不可能覆盖的域外主题。
-    "碳排放配额交易", "ISO14001环境认证", "对外担保额度", "内幕信息管理",
-    "反垄断合规审查", "知识产权许可费", "董监高责任保险", "员工商业保险方案",
-    "年终奖发放", "年休假天数", "五险一金缴纳比例", "加班补贴",
+    "碳排放配额交易",
+    "ISO14001环境认证",
+    "对外担保额度",
+    "内幕信息管理",
+    "反垄断合规审查",
+    "知识产权许可费",
+    "董监高责任保险",
+    "员工商业保险方案",
+    "年终奖发放",
+    "年休假天数",
+    "五险一金缴纳比例",
+    "加班补贴",
 ]
 
 _STOPWORDS = {
-    "会议", "讨论", "决定", "汇报", "跟进", "安排", "进行", "相关", "工作", "内容",
-    "情况", "问题", "要求", "完成", "确认", "通知", "公司", "项目", "部分", "以下",
-    "以上", "今天", "明天", "昨天", "时间", "地点", "人员", "同志", "各位", "大家",
-    "继续", "针对", "目前", "需要", "可以", "应该", "已经", "会上", "关于", "我们",
-    "他们", "自己", "很多", "非常",
+    "会议",
+    "讨论",
+    "决定",
+    "汇报",
+    "跟进",
+    "安排",
+    "进行",
+    "相关",
+    "工作",
+    "内容",
+    "情况",
+    "问题",
+    "要求",
+    "完成",
+    "确认",
+    "通知",
+    "公司",
+    "项目",
+    "部分",
+    "以下",
+    "以上",
+    "今天",
+    "明天",
+    "昨天",
+    "时间",
+    "地点",
+    "人员",
+    "同志",
+    "各位",
+    "大家",
+    "继续",
+    "针对",
+    "目前",
+    "需要",
+    "可以",
+    "应该",
+    "已经",
+    "会上",
+    "关于",
+    "我们",
+    "他们",
+    "自己",
+    "很多",
+    "非常",
     # 实测噪声（首版跨文档/时间题选词质量差，Phase 2 记录）
-    "处理结果", "本处", "校正", "文本处理", "代码运行", "case", "dta", "议题",
-    "纪要", "与会", "本次", "执行", "owner", "结果", "记录", "文档", "文件", "首页",
-    "未命名", "信息", "数据", "系统", "流程", "管理", "服务", "支持", "使用", "建议",
+    "处理结果",
+    "本处",
+    "校正",
+    "文本处理",
+    "代码运行",
+    "case",
+    "dta",
+    "议题",
+    "纪要",
+    "与会",
+    "本次",
+    "执行",
+    "owner",
+    "结果",
+    "记录",
+    "文档",
+    "文件",
+    "首页",
+    "未命名",
+    "信息",
+    "数据",
+    "系统",
+    "流程",
+    "管理",
+    "服务",
+    "支持",
+    "使用",
+    "建议",
     # 会议纪要模板词（跨全库出现，无区分度）
-    "提案", "提案者", "附议", "附议区", "决议", "决议区", "动议", "动议区", "辩论",
-    "辩论区", "投票", "投票区", "元数据", "元数据区", "同意", "否决", "弃权", "单选",
-    "实名", "立即", "后续", "备注", "说明", "附件", "版本", "编号", "目录", "标题",
-    "正文", "摘要",
+    "提案",
+    "提案者",
+    "附议",
+    "附议区",
+    "决议",
+    "决议区",
+    "动议",
+    "动议区",
+    "辩论",
+    "辩论区",
+    "投票",
+    "投票区",
+    "元数据",
+    "元数据区",
+    "同意",
+    "否决",
+    "弃权",
+    "单选",
+    "实名",
+    "立即",
+    "后续",
+    "备注",
+    "说明",
+    "附件",
+    "版本",
+    "编号",
+    "目录",
+    "标题",
+    "正文",
+    "摘要",
 }
 
 # 人名实体抽取：只用高精度结构信号（实测零噪声，见 Phase 2 记录）
@@ -122,12 +221,14 @@ def _cross_doc_items(docs: list[dict], llm_cfg: dict) -> list[GoldItem]:
     for name, src in scored[:8]:
         items.append(
             GoldItem(
-                id="", type="cross_doc",
+                id="",
+                type="cross_doc",
                 question=f"关于「{name}」，公司文档里出现过哪些讨论或安排？",
                 expected_answer=f"散见于 {len(src)} 篇文档，围绕「{name}」有多次记录（聚合题，按检索命中评分）",
                 must_contain=[name],
                 source_doc_ids=src,
-                refusable=False, source_title="(跨文档)",
+                refusable=False,
+                source_title="(跨文档)",
             )
         )
     return items
@@ -143,7 +244,9 @@ def _load_docs(parsed_dir: Path) -> list[dict]:
         except Exception:  # noqa: BLE001, S112  # 坏导出直接跳过，不让单份文件中断整轮出题
             continue
         title = data.get("meta", {}).get("title") or json_file.stem
-        text = "\n".join(b.get("text", "") for b in data.get("blocks", []) if b.get("text"))
+        text = "\n".join(
+            b.get("text", "") for b in data.get("blocks", []) if b.get("text")
+        )
         if len(text.strip()) < 120:  # 空导出没有出题价值
             continue
         docs.append({"doc_id": data["meta"]["doc_id"], "title": title, "text": text})
@@ -200,7 +303,10 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
     for a in arr if isinstance(arr, list) else []:
         if not isinstance(a, dict):
             continue
-        q, ans = str(a.get("question", "")).strip(), str(a.get("expected_answer", "")).strip()
+        q, ans = (
+            str(a.get("question", "")).strip(),
+            str(a.get("expected_answer", "")).strip(),
+        )
         mc = [str(x) for x in (a.get("must_contain") or []) if str(x).strip()]
         if len(q) < 10 or not ans or not mc:
             continue
@@ -208,8 +314,14 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
             continue  # 关键词不在原文 → 丢弃（LLM 幻觉或改写）
         items.append(
             GoldItem(
-                id="", type=qtype, question=q, expected_answer=ans, must_contain=mc,
-                source_doc_ids=[doc["doc_id"]], refusable=False, source_title=doc["title"],
+                id="",
+                type=qtype,
+                question=q,
+                expected_answer=ans,
+                must_contain=mc,
+                source_doc_ids=[doc["doc_id"]],
+                refusable=False,
+                source_title=doc["title"],
             )
         )
         if len(items) >= 2:
@@ -244,12 +356,14 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
         for name, src in scored[:6]:
             items.append(
                 GoldItem(
-                    id="", type="time_filter",
+                    id="",
+                    type="time_filter",
                     question=f"{year}年的文档中，关于「{name}」有哪些记录？",
                     expected_answer=f"{year}年语料中「{name}」相关内容（时间限定题，按检索命中评分）",
                     must_contain=[name],
                     source_doc_ids=src,
-                    refusable=False, source_title=f"({year})",
+                    refusable=False,
+                    source_title=f"({year})",
                 )
             )
             if len(items) >= 12:
@@ -262,7 +376,15 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
 _ZERO_WIDTH = str.maketrans("", "", "\u200b\u200c\u200d\ufeff")
 
 # 决议区的模板占位（不是真决议）
-_DECISION_PLACEHOLDERS = {"无", "暂无", "待定", "讨论结果", "（讨论结果）", "无决议", "见下"}
+_DECISION_PLACEHOLDERS = {
+    "无",
+    "暂无",
+    "待定",
+    "讨论结果",
+    "（讨论结果）",
+    "无决议",
+    "见下",
+}
 
 # 决议线索词：真决议几乎必含其一（人工核对全库 20 个候选后定的白名单，
 # 精确优先——讨论备注/评审意见混进来会污染 decision 题型）
@@ -284,7 +406,7 @@ def _decision_candidates(d: dict) -> list[str]:
     out = []
     text = d["text"]
     for m in re.finditer("决议区", text):
-        after = text[m.end():]
+        after = text[m.end() :]
         stop = len(after)
         for marker in ("投票区", "附议区"):
             p = after.find(marker)
@@ -293,7 +415,8 @@ def _decision_candidates(d: dict) -> list[str]:
         lines = [_clean_text(x) for x in after[:stop].split("\n")]
         dec = next(
             (
-                ln for ln in lines
+                ln
+                for ln in lines
                 if len(ln) >= 10 and ln not in _DECISION_PLACEHOLDERS and "|" not in ln
             ),
             None,
@@ -340,11 +463,13 @@ def _decision_items(docs: list[dict]) -> list[GoldItem]:
             seen_sentences.add(decision)
             items.append(
                 GoldItem(
-                    id="", type="decision",
+                    id="",
+                    type="decision",
                     question=f"在《{title}》关于「{topic}」的讨论中，会议最终形成了什么决议？",
                     expected_answer=decision,
                     must_contain=must,
-                    source_doc_ids=[d["doc_id"]], refusable=False,
+                    source_doc_ids=[d["doc_id"]],
+                    refusable=False,
                     source_title=title,
                     origin="programmatic_decision",
                 )
@@ -370,11 +495,14 @@ def _no_answer_items(docs: list[dict]) -> list[GoldItem]:
             continue  # 语料含相关内容 → 题目不成立
         items.append(
             GoldItem(
-                id="", type="no_answer",
+                id="",
+                type="no_answer",
                 question=f"公司关于{topic}的制度或标准是什么？",
                 expected_answer="应拒答：现有文档没有讨论过该主题",
-                must_contain=[], source_doc_ids=[],
-                refusable=True, source_title="(全库不存在)",
+                must_contain=[],
+                source_doc_ids=[],
+                refusable=True,
+                source_title="(全库不存在)",
             )
         )
         if len(items) >= 8:
@@ -410,7 +538,8 @@ def generate(
         kept = [
             GoldItem.model_validate(i)
             for i in existing["items"]
-            if i["type"] not in _PROGRAMMATIC and i.get("origin") != "programmatic_decision"
+            if i["type"] not in _PROGRAMMATIC
+            and i.get("origin") != "programmatic_decision"
         ]
         programmatic_decisions = _decision_items(docs)
 
@@ -453,5 +582,7 @@ def generate(
             "decision 增加程序化构造（决议区提取，零 LLM）；LLM 生成题原样保留"
         )
     payload = {"meta": meta_out, "items": [i.model_dump() for i in final]}
-    out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_file.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return meta_out

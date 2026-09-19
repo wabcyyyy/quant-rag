@@ -13,7 +13,25 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parents[2]
+
+def project_root() -> Path:
+    """项目根：DOC_RAG_HOME 优先，其次向上找带 configs/default.yaml 的目录，最后回落到 cwd。
+
+    改造前这里是 `Path(__file__).parents[2]`，只在 editable 安装下成立；
+    打成 wheel 装进 site-packages 后 `load_config()` 会去 site-packages 找配置文件。
+    缓存路径（llm._CACHE_PATH）同理，所以两处共用这个解析器。
+    """
+    env = os.environ.get("DOC_RAG_HOME")
+    if env:
+        return Path(env).resolve()
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "configs" / "default.yaml").is_file():
+            return parent
+    return Path.cwd()
+
+
+ROOT = project_root()
 
 
 _BASE_URL_STRIP_SUFFIXES = ("/chat/completions", "/responses", "/embeddings")
@@ -49,7 +67,11 @@ def load_config(path: str | Path | None = None) -> dict:
     with cfg_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg = _expand_env(cfg)
-    for section in ("llm", "embedding", "rerank"):
+    for section in ("llm", "embedding", "rerank", "rewrite"):
         if isinstance(cfg.get(section), dict) and cfg[section].get("base_url"):
             cfg[section]["base_url"] = _normalize_base_url(cfg[section]["base_url"])
+    # judge 可以指向另一家供应商（跨供应商复判，PLAN「judge 自偏」），同样要归一化
+    judge = (cfg.get("eval") or {}).get("judge")
+    if isinstance(judge, dict) and judge.get("base_url"):
+        judge["base_url"] = _normalize_base_url(judge["base_url"])
     return cfg

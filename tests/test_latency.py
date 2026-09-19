@@ -17,6 +17,7 @@ import pytest
 from doc_rag.eval import runner
 from doc_rag.eval.runner import _latency_summary, _quantiles
 from doc_rag.generate import llm as llm_mod
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 # ---------------------------------------------------------------- _quantiles
 
@@ -82,6 +83,73 @@ def test_chat_timed_flags_real_call_and_counts_attempts(monkeypatch):
     assert meta["attempts"] == 1
 
 
+def test_client_timeout_comes_from_cfg_not_the_180s_default(monkeypatch):
+    """关键路径上的短调用必须能自带超时上限：180s 是给几十秒的聚合答案用的，
+    一次意图分类吃同样的超时，等于让它有能力把整个请求拖停三分钟。"""
+    seen: dict = {}
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            resp = Mock()
+            resp.choices = [Mock(message=Mock(content="x"))]
+            resp.usage = None
+            self.chat = Mock(completions=Mock(create=lambda **kw: resp))
+
+    monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
+    llm_mod.chat_timed(
+        {"model": "m", "base_url": "https://api.x", "api_key": "k", "timeout_s": 5},
+        "问题",
+    )
+    assert seen["timeout"] == 5.0
+    assert seen["max_retries"] == 0  # 重试只归应用层管，不与 SDK 相乘
+
+    seen.clear()
+    llm_mod.chat_timed(
+        {"model": "m", "base_url": "https://api.x", "api_key": "k"}, "问题"
+    )
+    assert seen["timeout"] == llm_mod._DEFAULT_TIMEOUT_S
+
+
+def test_max_attempts_bounds_the_retry_loop_and_is_reported_honestly(monkeypatch):
+    """`已重试 N 次` 必须是真的 N；上限可由配置收紧，且退避不该把上限跑满。"""
+
+    class _Flaky(Exception):
+        status_code = 503
+
+    attempts: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        @property
+        def chat(self):
+            def _create(**kw):
+                attempts.append(1)
+                raise _Flaky("上游抖动")
+
+            return Mock(completions=Mock(create=_create))
+
+    monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
+    monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: False)
+    slept: list[float] = []
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: slept.append(s))
+    base = {"model": "m", "base_url": "https://api.x", "api_key": "k"}
+    with pytest.raises(RuntimeError, match="attempt=2"):
+        llm_mod.chat_timed({**base, "max_attempts": 2}, "问题")
+    assert len(attempts) == 2
+    assert slept == [llm_mod._BACKOFF_BASE]  # 只在两次之间退避一次
+
+    attempts.clear()
+    slept.clear()
+    with pytest.raises(RuntimeError, match=f"attempt={llm_mod._RETRIES}"):
+        llm_mod.chat_timed(base, "问题")
+    assert len(attempts) == llm_mod._RETRIES
+
+
 def test_chat_still_returns_plain_text(monkeypatch):
     """chat() 是既有调用点依赖的接口，必须仍返回 str。"""
     monkeypatch.setattr(llm_mod, "cache_enabled", lambda cfg=None: True)
@@ -108,8 +176,12 @@ def test_reasoning_effort_reaches_request_kwargs(monkeypatch):
             self.chat = Mock(completions=Mock(create=_create))
 
     monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
-    cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k",
-           "reasoning_effort": "none"}
+    cfg = {
+        "model": "m",
+        "base_url": "https://api.x.com",
+        "api_key": "k",
+        "reasoning_effort": "none",
+    }
     llm_mod.chat(cfg, "问题")
     assert seen.get("reasoning_effort") == "none"
 
@@ -132,7 +204,9 @@ def test_no_reasoning_effort_key_when_unset(monkeypatch):
             self.chat = Mock(completions=Mock(create=_create))
 
     monkeypatch.setattr(llm_mod, "OpenAI", _FakeClient)
-    llm_mod.chat({"model": "m", "base_url": "https://api.x.com", "api_key": "k"}, "问题")
+    llm_mod.chat(
+        {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}, "问题"
+    )
     assert "reasoning_effort" not in seen
 
 
@@ -141,11 +215,16 @@ def test_no_reasoning_effort_key_when_unset(monkeypatch):
 
 def _item(id_, type_, answer, synth_ms, cached, total_ms=None):
     return {
-        "id": id_, "type": type_, "answer": answer,
+        "id": id_,
+        "type": type_,
+        "answer": answer,
         "latency": {
-            "rewrite": 1.0, "retrieve": 200.0, "rerank": 50.0,
+            "rewrite": 1.0,
+            "retrieve": 200.0,
+            "rerank": 50.0,
             "retrieval_total": 251.0,
-            "synthesize": synth_ms, "synth_cached": cached,
+            "synthesize": synth_ms,
+            "synth_cached": cached,
             "total": total_ms if total_ms is not None else (synth_ms or 0) + 251.0,
         },
     }
@@ -155,7 +234,7 @@ def test_latency_summary_excludes_cached_from_synthesize_percentiles():
     """缓存命中的合成耗时不得进入合成分位数——否则 LLM 延迟被拉到毫秒级。"""
     rows = [
         _item("q1", "fact", "短答案", 3000.0, False),
-        _item("q2", "fact", "短答案", 2.0, True),   # 缓存命中：2ms 不是延迟
+        _item("q2", "fact", "短答案", 2.0, True),  # 缓存命中：2ms 不是延迟
         _item("q3", "fact", "短答案", 4000.0, False),
     ]
     lat = _latency_summary(rows)
@@ -206,19 +285,42 @@ def test_latency_summary_empty_without_timing():
 def test_evaluate_records_latency_and_self_documenting_meta(tmp_path, monkeypatch):
     """evaluate 必须落盘分阶段延迟，并让 meta 自证模型与缓存开关。"""
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "text",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "费用67元 [1]"
     synthesizer.last_meta = {"ms": 1234.5, "cached": False, "model": "deepseek-flash"}
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, synthesizer))
+    )
 
     cfg = {"retrieval": {}, "llm": {"model": "deepseek-flash", "cache": False}}
     results = runner.evaluate(gold, cfg=cfg)
@@ -237,19 +339,42 @@ def test_evaluate_records_latency_and_self_documenting_meta(tmp_path, monkeypatc
 
 def test_evaluate_marks_contaminated_when_cache_hit(tmp_path, monkeypatch):
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "text",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "费用67元 [1]"
     synthesizer.last_meta = {"ms": 1.2, "cached": True, "model": "m"}
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, synthesizer))
+    )
 
     cfg = {"retrieval": {}, "llm": {"model": "m", "cache": True}}
     results = runner.evaluate(gold, cfg=cfg)
@@ -262,16 +387,39 @@ def test_evaluate_marks_contaminated_when_cache_hit(tmp_path, monkeypatch):
 def test_evaluate_without_answers_has_no_synthesize_timing(tmp_path, monkeypatch):
     """检索模式不调 LLM：合成分位数应为空，但检索侧延迟照常记录。"""
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
-    ]
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, Mock())))
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "text",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, Mock()))
+    )
 
     cfg = {"retrieval": {}, "llm": {"model": "m"}}
     results = runner.evaluate(gold, cfg=cfg, with_answers=False)
@@ -292,7 +440,8 @@ def test_synthesizer_records_meta(monkeypatch, cached):
     from doc_rag.generate.synthesizer import Synthesizer
 
     monkeypatch.setattr(
-        llm_mod, "chat_timed",
+        llm_mod,
+        "chat_timed",
         lambda *a, **k: ("答", {"ms": 42.0, "cached": cached, "model": "m"}),
     )
     syn = Synthesizer({"model": "m"})
@@ -306,9 +455,13 @@ def test_synthesizer_records_meta(monkeypatch, cached):
 def _capture_cfg(monkeypatch):
     seen: list = []
     monkeypatch.setattr(
-        llm_mod, "chat_timed",
-        lambda cfg, *a, **k: (seen.append(dict(cfg)), "答",
-                              {"ms": 1.0, "cached": False, "model": cfg["model"]})[1:],
+        llm_mod,
+        "chat_timed",
+        lambda cfg, *a, **k: (
+            seen.append(dict(cfg)),
+            "答",
+            {"ms": 1.0, "cached": False, "model": cfg["model"]},
+        )[1:],
     )
     return seen
 
@@ -318,13 +471,14 @@ def test_aggregate_uses_dedicated_effort_when_configured(monkeypatch):
     from doc_rag.generate.synthesizer import Synthesizer
 
     seen = _capture_cfg(monkeypatch)
-    syn = Synthesizer({"model": "m", "reasoning_effort": "",
-                       "reasoning_effort_aggregate": "none"})
+    syn = Synthesizer(
+        {"model": "m", "reasoning_effort": "", "reasoning_effort_aggregate": "none"}
+    )
     ctx = [{"no": 1, "text": "t", "doc": "d", "page": 1}]
     syn.answer("普通题", ctx)
     syn.answer("聚合题", ctx, aggregate=True)
-    assert not seen[0].get("reasoning_effort")         # 普通题：全局空 = 不会进请求参数
-    assert seen[1]["reasoning_effort"] == "none"       # 聚合题：走专用档
+    assert not seen[0].get("reasoning_effort")  # 普通题：全局空 = 不会进请求参数
+    assert seen[1]["reasoning_effort"] == "none"  # 聚合题：走专用档
 
 
 def test_aggregate_falls_back_to_global_when_unset(monkeypatch):
@@ -333,7 +487,9 @@ def test_aggregate_falls_back_to_global_when_unset(monkeypatch):
 
     seen = _capture_cfg(monkeypatch)
     syn = Synthesizer({"model": "m", "reasoning_effort": "none"})
-    syn.answer("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True)
+    syn.answer(
+        "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+    )
     assert seen[0]["reasoning_effort"] == "none"
 
 
@@ -342,7 +498,9 @@ def test_aggregate_unset_means_no_override(monkeypatch):
 
     seen = _capture_cfg(monkeypatch)
     syn = Synthesizer({"model": "m", "reasoning_effort": ""})
-    syn.answer("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True)
+    syn.answer(
+        "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+    )
     assert not seen[0].get("reasoning_effort")  # 空=不进请求参数，与未配置等价
 
 
@@ -353,25 +511,41 @@ def test_original_llm_cfg_not_mutated(monkeypatch):
     _capture_cfg(monkeypatch)
     cfg = {"model": "m", "reasoning_effort_aggregate": "none"}
     syn = Synthesizer(cfg)
-    syn.answer("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True)
+    syn.answer(
+        "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+    )
     assert "reasoning_effort" not in cfg
 
 
 def test_runner_passes_aggregate_flag_to_synthesizer(tmp_path, monkeypatch):
     """runner 必须把聚合标志传下去，否则分流在评估路径上不生效。"""
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "cross_doc", "question": "关于X做过哪些决定？",
-        "expected_answer": "", "source_doc_ids": ["d1"], "must_contain": [],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "cross_doc",
+                        "question": "关于X做过哪些决定？",
+                        "expected_answer": "",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "t", "page": 1, "text": "正文", "block_type": "p"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {"doc_id": "d1", "title": "t", "page": 1, "text": "正文", "block_type": "p"}
+        ]
+    )
     syn = Mock()
     syn.answer.return_value = "答案"
     monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, syn)))
-    monkeypatch.setattr(runner, "_maybe_rerank", lambda cfg, q, r, use: r)
 
     results = runner.evaluate(
         gold, cfg={"retrieval": {}, "llm": {"model": "m"}}, aggregate=True
@@ -403,9 +577,7 @@ def test_chat_timed_reports_usage_in_meta(monkeypatch):
     monkeypatch.setattr(llm_mod, "_cache_put", lambda *a, **k: None)
     usage = Mock(prompt_tokens=100, completion_tokens=50)
     usage.completion_tokens_details = Mock(reasoning_tokens=40)
-    monkeypatch.setattr(
-        llm_mod, "OpenAI", _fake_client_with({}, usage)
-    )
+    monkeypatch.setattr(llm_mod, "OpenAI", _fake_client_with({}, usage))
     cfg = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
     _, meta = llm_mod.chat_timed(cfg, "问题")
     assert meta["prompt_tokens"] == 100
@@ -438,33 +610,64 @@ def test_chat_timed_cached_hit_has_no_usage(monkeypatch):
 def test_evaluate_records_usage_per_item_and_totals(tmp_path, monkeypatch):
     """runner 把 synth_meta 的用量写进逐条 latency.usage，summary 给全量合计。"""
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [
-        {
-            "id": "q001", "type": "fact", "question": "费用？",
-            "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-        },
-        {
-            "id": "q002", "type": "fact", "question": "预算？",
-            "expected_answer": "9元", "source_doc_ids": ["d1"], "must_contain": ["9元"],
-        },
-    ]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    },
+                    {
+                        "id": "q002",
+                        "type": "fact",
+                        "question": "预算？",
+                        "expected_answer": "9元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["9元"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "text",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.side_effect = ["费用67元 [1]", "预算9元 [1]"]
     synthesizer.last_meta = {
-        "ms": 5000.0, "cached": False, "model": "m",
-        "prompt_tokens": 100, "completion_tokens": 50, "reasoning_tokens": 40,
+        "ms": 5000.0,
+        "cached": False,
+        "model": "m",
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "reasoning_tokens": 40,
     }
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, synthesizer))
+    )
 
     cfg = {"retrieval": {}, "llm": {"model": "m", "cache": False}}
     results = runner.evaluate(gold, cfg=cfg)
     item = results["items"][0]
     assert item["latency"]["usage"] == {
-        "prompt_tokens": 100, "completion_tokens": 50, "reasoning_tokens": 40,
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "reasoning_tokens": 40,
     }
     usage = results["summary"]["latency"]["usage"]
     assert usage["prompt_tokens"] == 200
@@ -476,18 +679,41 @@ def test_evaluate_records_usage_per_item_and_totals(tmp_path, monkeypatch):
 def test_evaluate_without_usage_still_writes_results(tmp_path, monkeypatch):
     """Mock/旧版 synthesizer 没有 usage 时：逐条为 None，summary 不造合计。"""
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "text",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "费用67元 [1]"
     synthesizer.last_meta = {"ms": 1234.5, "cached": False, "model": "m"}
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, synthesizer))
+    )
 
     results = runner.evaluate(gold, cfg={"retrieval": {}, "llm": {"model": "m"}})
     assert results["items"][0]["latency"]["usage"] is None
@@ -515,17 +741,40 @@ def test_evaluate_meta_records_prompt_fingerprint(tmp_path, monkeypatch):
     from doc_rag.generate import prompts
 
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-    }]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "t", "page": 1, "text": "费用67元", "block_type": "p"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "t",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "p",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "费用67元 [1]"
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, synthesizer))
+    )
 
     results = runner.evaluate(gold, cfg={"retrieval": {}, "llm": {"model": "m"}})
     assert results["meta"]["prompt_fingerprint"] == prompts.fingerprint()

@@ -18,7 +18,9 @@ def test_normalize_date():
 
 
 def test_parse_llm_json():
-    assert parse_llm_json('```json\n{"date": "2026-09-01"}\n```') == {"date": "2026-09-01"}
+    assert parse_llm_json('```json\n{"date": "2026-09-01"}\n```') == {
+        "date": "2026-09-01"
+    }
     assert parse_llm_json('前缀 {"topics": ["预算"]} 后缀') == {"topics": ["预算"]}
     assert parse_llm_json("不是 json") is None
     assert parse_llm_json("") is None

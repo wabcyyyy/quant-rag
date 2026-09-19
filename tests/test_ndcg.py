@@ -10,6 +10,7 @@ import pytest
 
 from doc_rag.eval import runner
 from doc_rag.eval.runner import _ndcg_at_k
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 
 def test_perfect_ranking_scores_one():
@@ -48,21 +49,44 @@ def test_no_relevant_returns_none():
 def test_runner_summary_has_ndcg(tmp_path, monkeypatch):
     """runner 接线：summary 增 ndcg_at_8，与 recall/mrr 同分母（排除无来源题）。"""
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [
-        {
-            "id": "q001", "type": "fact", "question": "费用？",
-            "expected_answer": "67元", "source_doc_ids": ["d1"], "must_contain": ["67元"],
-        },
-        {
-            "id": "q002", "type": "no_answer", "question": "未讨论议题？",
-            "expected_answer": "应拒答", "source_doc_ids": [], "must_contain": [],
-            "refusable": True,
-        },
-    ]}), encoding="utf-8")
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    },
+                    {
+                        "id": "q002",
+                        "type": "no_answer",
+                        "question": "未讨论议题？",
+                        "expected_answer": "应拒答",
+                        "source_doc_ids": [],
+                        "must_contain": [],
+                        "refusable": True,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     retriever = Mock(collection="c", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元", "block_type": "text"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[
+            {
+                "doc_id": "d1",
+                "title": "报价",
+                "page": 1,
+                "text": "费用67元",
+                "block_type": "text",
+            }
+        ]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "根据现有文档无法回答"
     monkeypatch.setattr(

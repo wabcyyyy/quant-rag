@@ -1,8 +1,8 @@
-"""统一中间表示（PLAN §5.1）：三路来源归一化到同一套 Block/Chunk。
+"""统一中间表示（PLAN §5.1）：双路来源归一化到同一套 Block/Chunk。
 
-- 飞书云文档 → OpenAPI docx blocks（原生结构，最优，待权限）
-- doc/docx   → LibreOffice headless 归一 → mammoth
-- PDF        → PyMuPDF 快通道（born-digital 文本层）
+语料为飞书/Word 批量导出后手动迁入 data/raw，不对接平台 API。
+- doc/docx → LibreOffice headless 归一 → mammoth
+- PDF      → PyMuPDF 快通道（born-digital 文本层）
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ class Block(BaseModel):
 
 
 class SourceMeta(BaseModel):
-    source_type: str  # feishu | docx | doc | pdf
+    source_type: str  # docx | doc | pdf
     doc_id: str
     title: str | None = None
-    # 飞书 API 自带；文件来源为 None，由 LLM 元数据抽取补齐（PLAN §5.1）
+    # 文件来源默认为 None，由 LLM 元数据抽取补齐（PLAN §5.1）
     owner: str | None = None
     created_at: str | None = None
     edited_at: str | None = None

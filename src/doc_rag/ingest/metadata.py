@@ -100,7 +100,9 @@ def extract_metadata(doc: IntermediateDoc, llm_cfg: dict) -> dict:
     try:
         reply = llm.chat(
             llm_cfg,
-            prompts.METADATA_EXTRACTION.format(document=doc.to_text()[:_PROMPT_TEXT_CHARS]),
+            prompts.METADATA_EXTRACTION.format(
+                document=doc.to_text()[:_PROMPT_TEXT_CHARS]
+            ),
             temperature=0,
         )
         data = parse_llm_json(reply) or {}

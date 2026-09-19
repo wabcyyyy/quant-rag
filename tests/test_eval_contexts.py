@@ -1,17 +1,36 @@
-"""RAGAS 上下文口径测试：judge 必须看到 LLM 实际看到的那份上下文。"""
+"""RAGAS 上下文口径测试：judge 必须看到 LLM 实际看到的那份上下文。
+
+这里的 `_contexts` 走 Orchestrator 的真实构造路径（上下文拼装已从 eval 收进
+Orchestrator，测试不能再测一份复制品）。
+"""
 
 from __future__ import annotations
 
 from doc_rag.eval.runner import (
-    _contexts,
     _judge_contexts,
     _legacy_contexts,
     _sample_rows,
 )
+from doc_rag.orchestrator import Orchestrator
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 
 def _chunk(text: str, title: str | None = "某文档", page: int | None = 3) -> dict:
     return {"text": text, "title": title, "doc_id": "d1", "page": page}
+
+
+class _Retriever:
+    def __init__(self, results: list[dict]) -> None:
+        self._results = results
+
+    def retrieve(self, question, **kw):
+        return RetrievalOutcome(chunks=list(self._results))
+
+
+def _contexts(retrieved: list[dict], max_n: int | None = None) -> list[dict]:
+    cfg = {"retrieval": {"max_contexts": max_n or 0}, "llm": {"model": "m"}}
+    orch = Orchestrator(cfg, retriever=_Retriever(retrieved), synthesizer=None)
+    return orch.answer("问题", use_rewrite=False, with_answer=False).contexts
 
 
 def test_judge_contexts_carry_doc_title_and_number():
@@ -50,7 +69,10 @@ def test_legacy_contexts_detects_old_text_only_format():
 
 def test_sample_rows_spreads_across_tail_types():
     """均匀抽样：黄金集按题型分块排序，取前 N 条会整段漏掉末尾题型。"""
-    rows = [{"id": f"q{i:02d}", "type": "fact" if i < 40 else "cross_doc"} for i in range(55)]
+    rows = [
+        {"id": f"q{i:02d}", "type": "fact" if i < 40 else "cross_doc"}
+        for i in range(55)
+    ]
     picked = _sample_rows(rows, 15)
     assert len(picked) == 15
     assert picked[0]["id"] == "q00"

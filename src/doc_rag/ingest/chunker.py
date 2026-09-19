@@ -63,7 +63,7 @@ def chunk_document(doc: IntermediateDoc) -> list[Chunk]:
         if not current:
             return
         text = "\n".join(b.text for b in current if b.text.strip())
-        for part in (_slide(text) if len(text) > MAX_CHARS else [text]):
+        for part in _slide(text) if len(text) > MAX_CHARS else [text]:
             chunks.append(
                 Chunk(
                     chunk_id=f"{doc.meta.doc_id}:{len(chunks) + 1}",

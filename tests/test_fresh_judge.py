@@ -7,29 +7,54 @@ from typer.testing import CliRunner
 from doc_rag import cli
 from doc_rag.eval import runner
 from doc_rag.generate import llm
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 
 @pytest.fixture
 def offline_eval(tmp_path, monkeypatch):
     gold = tmp_path / "gold.json"
-    gold.write_text(json.dumps({"items": [{
-        "id": "q001", "type": "fact", "question": "费用？",
-        "expected_answer": "67元", "source_doc_ids": ["d1"],
-        "must_contain": ["67元"],
-    }]}), encoding="utf-8")
-    cfg = {"retrieval": {}, "eval": {"gold_file": str(gold)},
-           "paths": {"eval": str(tmp_path)}}
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q001",
+                        "type": "fact",
+                        "question": "费用？",
+                        "expected_answer": "67元",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["67元"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = {
+        "retrieval": {},
+        "eval": {"gold_file": str(gold)},
+        "paths": {"eval": str(tmp_path)},
+    }
     retriever = Mock(collection="test", cfg={})
-    retriever.retrieve.return_value = [
-        {"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元"}
-    ]
+    retriever.retrieve.return_value = RetrievalOutcome(
+        chunks=[{"doc_id": "d1", "title": "报价", "page": 1, "text": "费用67元"}]
+    )
     synthesizer = Mock()
     synthesizer.answer.return_value = "费用67元 [1]"
-    monkeypatch.setattr(runner, "_build_retriever", Mock(return_value=(retriever, synthesizer)))
+    monkeypatch.setattr(
+        runner, "_build_retriever", Mock(return_value=(retriever, synthesizer))
+    )
     monkeypatch.setattr(cli, "load_config", lambda: cfg)
-    monkeypatch.setattr(llm, "cache_stats", lambda: {
-        "hit": 0, "miss": 0, "hit_rate": None, "cached_total": 0,
-    })
+    monkeypatch.setattr(
+        llm,
+        "cache_stats",
+        lambda: {
+            "hit": 0,
+            "miss": 0,
+            "hit_rate": None,
+            "cached_total": 0,
+        },
+    )
     judge = Mock(return_value={"faithfulness": 1.0})
     monkeypatch.setattr(runner, "_run_ragas", judge)
     return gold, cfg, judge
@@ -64,8 +89,14 @@ def test_ragas_from_keeps_forwarding_fresh_judge(offline_eval, monkeypatch):
     gold, _, _ = offline_eval
     replay = Mock(return_value={"faithfulness": 1.0})
     monkeypatch.setattr(runner, "ragas_from_results", replay)
-    result = CliRunner().invoke(cli.app, [
-        "eval", "--ragas-from", str(gold), "--fresh-judge",
-    ])
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "eval",
+            "--ragas-from",
+            str(gold),
+            "--fresh-judge",
+        ],
+    )
     assert result.exit_code == 0, result.output
     assert replay.call_args.kwargs["use_cache"] is False

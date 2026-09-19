@@ -63,14 +63,20 @@ def _markdown_to_blocks(markdown: str) -> list[Block]:
         if m := _HEADING_RE.match(stripped):
             flush()
             blocks.append(
-                Block(type="heading", heading_level=len(m.group(1)), text=m.group(2).strip())
+                Block(
+                    type="heading",
+                    heading_level=len(m.group(1)),
+                    text=m.group(2).strip(),
+                )
             )
         elif stripped.startswith("|") and stripped.endswith("|"):
             flush()
             blocks.append(Block(type="table", text=stripped))
         elif _LIST_RE.match(stripped):
             flush()
-            blocks.append(Block(type="list_item", text=_LIST_RE.sub("", stripped, count=1)))
+            blocks.append(
+                Block(type="list_item", text=_LIST_RE.sub("", stripped, count=1))
+            )
         else:
             paragraph.append(stripped)
     flush()

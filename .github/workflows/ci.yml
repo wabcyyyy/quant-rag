@@ -22,4 +22,7 @@ jobs:
 
       # 全部离线 mock，零 API 成本（不需要任何密钥）
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      # 渐进式类型检查：基线见 pyproject 的 tool.mypy.overrides（只能缩短）
+      - run: uv run --with mypy mypy src
       - run: uv run pytest -q

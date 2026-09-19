@@ -6,13 +6,22 @@ import json
 
 import pytest
 
-from doc_rag.eval.compare import compare, format_report, load_scores
+from doc_rag.eval.compare import (
+    compare,
+    compare_retrieval,
+    format_report,
+    holm_bonferroni,
+    load_scores,
+)
 
 
-def _write(tmp_path, name: str, scores: dict[str, float], types: dict[str, str] | None = None):
+def _write(
+    tmp_path, name: str, scores: dict[str, float], types: dict[str, str] | None = None
+):
     types = types or {}
     per_item = [
-        {"id": i, "type": types.get(i, "fact"), "faithfulness": s} for i, s in scores.items()
+        {"id": i, "type": types.get(i, "fact"), "faithfulness": s}
+        for i, s in scores.items()
     ]
     payload = {
         "meta": {"collection": "c", "retrieval": "r"},
@@ -31,7 +40,9 @@ def _write(tmp_path, name: str, scores: dict[str, float], types: dict[str, str] 
 def test_load_scores_rejects_legacy_mean_only_file(tmp_path):
     legacy = tmp_path / "legacy.json"
     legacy.write_text(
-        json.dumps({"summary": {"n": 15, "metrics": ["faithfulness"], "faithfulness": 0.64}}),
+        json.dumps(
+            {"summary": {"n": 15, "metrics": ["faithfulness"], "faithfulness": 0.64}}
+        ),
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="没有逐条分数"):
@@ -84,19 +95,33 @@ def test_subset_sensitivity_exposes_order_bias(tmp_path):
 
 
 def test_format_report_renders_all_sections(tmp_path):
-    a = _write(tmp_path, "a.json", {"q1": 1.0, "q2": 0.0}, {"q1": "fact", "q2": "cross_doc"})
-    b = _write(tmp_path, "b.json", {"q1": 0.5, "q2": 0.5}, {"q1": "fact", "q2": "cross_doc"})
-    text = format_report(compare([{"label": "A", "files": [a]}, {"label": "B", "files": [b]}]))
+    a = _write(
+        tmp_path, "a.json", {"q1": 1.0, "q2": 0.0}, {"q1": "fact", "q2": "cross_doc"}
+    )
+    b = _write(
+        tmp_path, "b.json", {"q1": 0.5, "q2": 0.5}, {"q1": "fact", "q2": "cross_doc"}
+    )
+    text = format_report(
+        compare([{"label": "A", "files": [a]}, {"label": "B", "files": [b]}])
+    )
     assert "全量同题配对差异" in text
     assert "子集敏感性" in text
     assert "cross_doc" in text
+    # 两条轨的极差不是同一种噪声，标题不能串台
+    assert "RAGAS 配对判读" in text
+    assert "judge 噪声地板" in text
+    assert "检索" not in text.splitlines()[0]
 
 
 def test_load_scores_accepts_eval_results_format(tmp_path):
     """T4 三组对照的 compare 直接吃 eval 结果文件：ragas 摘要嵌在 results["ragas"]。"""
     payload = {
         "meta": {"collection": "c", "retrieval": "r", "llm_model": "m"},
-        "summary": {"n_items": 2, "recall_at_5": 0.9, "mrr": 0.8},  # 客观指标，无 per_item
+        "summary": {
+            "n_items": 2,
+            "hit_at_5": 0.9,
+            "mrr": 0.8,
+        },  # 客观指标，无 per_item
         "ragas": {
             "n": 2,
             "metrics": ["faithfulness"],
@@ -114,3 +139,216 @@ def test_load_scores_accepts_eval_results_format(tmp_path):
     assert loaded["metric"] == "faithfulness"
     assert loaded["items"] == {"q1": 1.0, "q2": 0.9}
     assert loaded["types"] == {"q1": "fact", "q2": "term"}
+
+
+# --------------------------------------------------------------------------- 检索轨
+
+
+def _ret_row(
+    rid: str,
+    rank: int | None,
+    cov: float | None,
+    ceiling: float | None,
+    ndcg: float | None,
+    n_ret: int,
+    n_ctx: int,
+    rtype: str = "fact",
+) -> dict:
+    return {
+        "id": rid,
+        "type": rtype,
+        "question": rid,
+        "first_hit_rank": rank,
+        "doc_coverage": cov,
+        "doc_coverage_ceiling": ceiling,
+        "ndcg_at_8": ndcg,
+        "n_retrieved": n_ret,
+        "n_contexts": n_ctx,
+        "contexts": [f"[{i}]（doc_{i} 第1页）正文" for i in range(1, n_ctx + 1)],
+    }
+
+
+def _write_ret(tmp_path, name: str, rows: list[dict]):
+    payload = {
+        "meta": {"collection": "c", "retrieval": "r", "top_n": 8, "budget": "fixed:8"},
+        "summary": {"n_items": len(rows)},
+        "ragas": None,
+        "items": rows,
+    }
+    path = tmp_path / name
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+_ROWS = [
+    _ret_row("q1", 3, 0.5, 1.0, 0.7, 8, 8),
+    _ret_row("q2", 9, 0.0, 1.0, 0.0, 8, 8),
+    _ret_row("q3", None, 0.0, 1.0, 0.0, 8, 8),
+    _ret_row("q4", None, None, None, None, 8, 6, rtype="no_answer"),  # 无 gold
+]
+
+
+def test_retrieval_track_derives_per_item_scores_from_items(tmp_path):
+    f = _write_ret(tmp_path, "a.json", _ROWS)
+    assert load_scores(f, "hit_at_5")["items"] == {"q1": 1.0, "q2": 0.0, "q3": 0.0}
+    assert load_scores(f, "hit_at_8")["items"]["q2"] == 0.0
+    assert load_scores(f, "hit_within_budget")["items"] == {
+        "q1": 1.0,
+        "q2": 1.0,
+        "q3": 0.0,
+    }
+    assert load_scores(f, "mrr")["items"]["q1"] == pytest.approx(1 / 3)
+    assert load_scores(f, "ndcg_at_8")["items"]["q1"] == 0.7
+    assert load_scores(f, "mean_doc_coverage")["items"]["q1"] == 0.5
+    assert load_scores(f, "coverage_vs_ceiling")["items"]["q1"] == pytest.approx(0.5)
+    assert load_scores(f, "hit_at_5")["track"] == "retrieval"
+    # 拒答题没有 gold：出现在 types 里，但一个检索指标的分母都不进
+    assert "q4" not in load_scores(f, "hit_at_5")["items"]
+    assert load_scores(f, "hit_at_5")["types"]["q4"] == "no_answer"
+
+
+def test_retrieval_file_without_metric_points_at_the_right_command(tmp_path):
+    f = _write_ret(tmp_path, "a.json", _ROWS)
+    with pytest.raises(ValueError, match="compare-retrieval"):
+        load_scores(f)
+
+
+def test_unequal_list_lengths_between_arms_are_flagged(tmp_path):
+    """重排的「−3.4pt / −1.6pt」就是靠这个伪影活下来的：两臂清单 6 格 vs 8 格。"""
+    a = _write_ret(
+        tmp_path,
+        "a.json",
+        [_ret_row(f"q{i}", i + 1, 1.0, 1.0, 1.0, 8, 8) for i in range(4)],
+    )
+    b = _write_ret(
+        tmp_path,
+        "b.json",
+        [_ret_row(f"q{i}", i + 1, 1.0, 0.75, 1.0, 6, 6) for i in range(4)],
+    )
+    rep = compare(
+        [{"label": "A", "files": [a]}, {"label": "B", "files": [b]}], metric="hit_at_5"
+    )
+    warns = rep["paired"][0]["warnings"]
+    assert any("检索清单不等长" in w for w in warns)
+    assert any("上下文块不等长" in w for w in warns)
+    assert any("覆盖率上限不同" in w for w in warns)
+    assert rep["groups"][1]["ceiling_mean"] == pytest.approx(0.75)
+
+
+def test_identical_config_reruns_have_zero_metric_noise(tmp_path):
+    """同配置两遍：doc 级检索指标逐条全等（实测 64/64），所以噪声地板是 0 而不是估值。"""
+    a = _write_ret(tmp_path, "a.json", [dict(r) for r in _ROWS])
+    b = _write_ret(tmp_path, "b.json", [dict(r) for r in _ROWS])
+    rep = compare(
+        [{"label": "跑法一", "files": [a]}, {"label": "跑法二", "files": [b]}],
+        metric="hit_at_8",
+    )
+    paired = rep["paired"][0]
+    assert (paired["wins"], paired["losses"], paired["ties"]) == (0, 0, 3)
+    assert paired["mean_diff"] == 0.0
+    assert paired["sign_test_p"] == 1.0
+    assert paired["warnings"] == []  # 等长同配置，不该报伪影
+    text = format_report(rep)
+    assert text.startswith("== 检索 配对判读")
+    assert "检索重跑噪声地板" in text
+
+
+def test_coverage_gain_that_is_purely_list_length(tmp_path):
+    """清单从 4 格扩到 8 格：覆盖率翻倍，但 `coverage_vs_ceiling` 一动不动。"""
+    a = _write_ret(
+        tmp_path,
+        "a.json",
+        [
+            _ret_row("q1", 1, 0.5, 0.5, 1.0, 4, 4),
+            _ret_row("q2", 2, 0.5, 0.5, 1.0, 4, 4),
+        ],
+    )
+    b = _write_ret(
+        tmp_path,
+        "b.json",
+        [
+            _ret_row("q1", 1, 1.0, 1.0, 1.0, 8, 8),
+            _ret_row("q2", 2, 1.0, 1.0, 1.0, 8, 8),
+        ],
+    )
+    groups = [{"label": "短清单", "files": [a]}, {"label": "长清单", "files": [b]}]
+    cov, norm = compare_retrieval(
+        groups, metrics=("mean_doc_coverage", "coverage_vs_ceiling")
+    )
+    assert cov["paired"][0]["mean_diff"] == pytest.approx(0.5)
+    assert norm["paired"][0]["mean_diff"] == pytest.approx(0.0)  # 归一化后没有差
+    assert cov["correction"]["family_size"] == 2 == norm["correction"]["family_size"]
+
+
+def test_holm_family_spans_every_arm_and_metric(tmp_path):
+    a = _write_ret(tmp_path, "a.json", [dict(r) for r in _ROWS])
+    b = _write_ret(tmp_path, "b.json", [dict(r) for r in _ROWS])
+    c = _write_ret(tmp_path, "c.json", [dict(r) for r in _ROWS])
+    groups = [
+        {"label": "基线", "files": [a]},
+        {"label": "臂2", "files": [b]},
+        {"label": "臂3", "files": [c]},
+    ]
+    reports = compare_retrieval(groups, metrics=("hit_at_5", "mrr", "ndcg_at_8"))
+    # 3 臂 × 3 指标 = 2 个对照 × 3 = 6 个配对检验，算一个家族
+    assert [len(r["paired"]) for r in reports] == [2, 2, 2]
+    assert {r["correction"]["family_size"] for r in reports} == {6}
+
+
+def test_holm_bonferroni_is_monotone_and_clipped():
+    assert holm_bonferroni([]) == []
+    assert holm_bonferroni([0.01, 0.04, 0.03]) == [0.03, 0.06, 0.06]
+    assert holm_bonferroni([0.9, 0.8]) == [1.0, 1.0]
+    # 只有一名挑战者时，Holm 与原始 p 相同（校正不该无中生有）
+    assert holm_bonferroni([0.04]) == [0.04]
+
+
+def _arms_with_wins(n_items: int, wins: int) -> list[dict]:
+    """基线全 miss（首命中在第 9 位），挑战臂把前 `wins` 题提到第 1 位。"""
+    ids = [f"q{i:02d}" for i in range(n_items)]
+    return [
+        _ret_row(i, 1 if n < wins else 9, 1.0 if n < wins else 0.0, 1.0, 1.0, 8, 8)
+        for n, i in enumerate(ids)
+    ]
+
+
+def test_holm_with_a_single_challenger_leaves_p_untouched(tmp_path):
+    from doc_rag.eval.compare import apply_holm
+
+    base = _write_ret(tmp_path, "a.json", _arms_with_wins(20, 0))  # 基线：全 miss
+    arm = _write_ret(tmp_path, "b.json", _arms_with_wins(20, 6))
+    rep = compare(
+        [{"label": "A", "files": [base]}, {"label": "B", "files": [arm]}],
+        metric="hit_at_5",
+    )
+    apply_holm([rep])
+    paired = rep["paired"][0]
+    assert (paired["wins"], paired["losses"]) == (6, 0)
+    assert paired["sign_test_p"] == pytest.approx(0.03125)
+    assert paired["p_holm"] == pytest.approx(paired["sign_test_p"])  # 家族=1，不放大
+    assert paired["significant_holm"] is True
+    text = format_report(rep)
+    assert "p_holm=" in text
+    assert "多重比较校正" in text
+
+
+def test_multiple_arms_can_take_a_significant_result_away(tmp_path):
+    """两个臂各自单次 p=0.031 过线，同族校正后都是 0.0625 → 报告必须翻成「不显著」。"""
+    base = _write_ret(tmp_path, "a.json", _arms_with_wins(20, 0))
+    arm2 = _write_ret(tmp_path, "b.json", _arms_with_wins(20, 6))
+    arm3 = _write_ret(tmp_path, "c.json", _arms_with_wins(20, 6))
+    reports = compare_retrieval(
+        [
+            {"label": "基线", "files": [base]},
+            {"label": "臂2", "files": [arm2]},
+            {"label": "臂3", "files": [arm3]},
+        ],
+        metrics=("hit_at_5",),
+    )
+    assert len(reports) == 1
+    assert reports[0]["correction"]["family_size"] == 2
+    for paired in reports[0]["paired"]:
+        assert paired["sign_test_p"] == pytest.approx(0.03125)
+        assert paired["p_holm"] == pytest.approx(0.0625)
+        assert paired["significant_holm"] is False
+    assert "校正后不显著" in format_report(reports[0])

@@ -9,7 +9,7 @@ build/
 # 环境变量
 .env
 
-# 公司语料与解析产物——严禁入库（合规，见 PLAN §8）
+# 公司语料与解析产物——严禁入库（合规，见 docs/design/PLAN.md §8）
 data/raw/*
 data/parsed/*
 !data/raw/.gitkeep
@@ -20,6 +20,8 @@ data/sample_parsed/
 data/eval/*.json
 # 例外：脱敏合成的格式模板（虚构公司内容，不含真实语料），见 README
 !data/eval/golden_sample.json
+# 例外：查询改写的泛化门禁集（全部指向 data/sample_raw 的虚构语料）
+!data/eval/rewrite_paraphrase.json
 
 # 工具缓存
 .pytest_cache/
@@ -30,10 +32,18 @@ data/eval/*.json
 # LLM 响应缓存（本地，可随时删除）
 .cache/
 
-# 面试准备（个人求职叙事）——只留本地，不入库不上传（README 保持纯工程文档）
-docs/
-!docs/
-!docs/how-it-works.md
+# docs/ 默认本地；工程文档白名单入库
+# 写法说明：!docs/ 救不回被 docs/** 忽略的子路径，必须逐级放行目录
+docs/**
+!docs/README.md
+!docs/architecture/
+!docs/architecture/**
+!docs/design/
+!docs/design/**
+!docs/guides/
+!docs/guides/**
+# 下列仍保持本地不入库：夜间执行记录、个人面试材料
+# docs/ops/** 与 docs/personal/** 未加入白名单
 
 # ZCode 会话产物
 .zcode/

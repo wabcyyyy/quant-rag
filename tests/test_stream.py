@@ -13,12 +13,15 @@ from types import SimpleNamespace
 
 from doc_rag.generate import llm as llm_mod
 from doc_rag.generate import prompts
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 _CFG = {"model": "m", "base_url": "https://api.x.com", "api_key": "k"}
 
 
 def _chunk(content):
-    return SimpleNamespace(usage=None, choices=[SimpleNamespace(delta=SimpleNamespace(content=content))])
+    return SimpleNamespace(
+        usage=None, choices=[SimpleNamespace(delta=SimpleNamespace(content=content))]
+    )
 
 
 def _usage_chunk(prompt=10, completion=5, reasoning=3):
@@ -103,17 +106,27 @@ def test_answer_stream_sets_last_meta_after_exhaustion(monkeypatch):
 
     def _fake_chat_stream(cfg, user_prompt, system_prompt=None, temperature=None):
         calls.append({"cfg": dict(cfg), "system": system_prompt})
-        meta = {"ms": 42.0, "cached": False, "model": "m",
-                "prompt_tokens": 1, "completion_tokens": 2, "reasoning_tokens": 0}
+        meta = {
+            "ms": 42.0,
+            "cached": False,
+            "model": "m",
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "reasoning_tokens": 0,
+        }
         return iter(["段1", "段2"]), meta
 
     monkeypatch.setattr(llm_mod, "chat_stream", _fake_chat_stream)
     syn = Synthesizer({"model": "m"})
     assert syn.last_meta is None
-    out = "".join(syn.answer_stream("q", [{"no": 1, "text": "t", "doc": "d", "page": 1}]))
+    out = "".join(
+        syn.answer_stream("q", [{"no": 1, "text": "t", "doc": "d", "page": 1}])
+    )
     assert out == "段1段2"
     assert syn.last_meta["ms"] == 42.0
-    assert calls[0]["system"] == prompts.SYSTEM_ANSWER  # 默认 tightened，与 answer() 一致
+    assert (
+        calls[0]["system"] == prompts.SYSTEM_ANSWER
+    )  # 默认 tightened，与 answer() 一致
 
 
 def test_answer_stream_aggregate_override(monkeypatch):
@@ -127,7 +140,11 @@ def test_answer_stream_aggregate_override(monkeypatch):
 
     monkeypatch.setattr(llm_mod, "chat_stream", _fake_chat_stream)
     syn = Synthesizer({"model": "m", "reasoning_effort_aggregate": "none"})
-    list(syn.answer_stream("聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True))
+    list(
+        syn.answer_stream(
+            "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+        )
+    )
     assert calls[0]["reasoning_effort"] == "none"
 
 
@@ -138,20 +155,27 @@ def test_query_stream_endpoint_event_sequence(monkeypatch):
     from fastapi.testclient import TestClient
 
     from doc_rag.api import main as api_main
+    from doc_rag.orchestrator import Orchestrator
 
     cfg = {"llm": {"model": "m"}, "retrieval": {"max_contexts": 0}}
+    # /query 与 /query/stream 要求鉴权；这里给一个配好的令牌
+    cfg["api"] = {"auth_token": "t", "allowed_collections": []}
     retriever = SimpleNamespace(
-        collection="c",
-        retrieve=lambda *a, **k: [
-            {"doc_id": "d1", "title": "文档", "page": 1, "text": "正文", "block_type": "p"}
-        ],
-    )
-    rewriter = SimpleNamespace(
-        rewrite=lambda q: {"rewritten": q, "filters": None, "aggregate": False, "top_n": 8}
+        retrieve=lambda *a, **k: RetrievalOutcome(
+            chunks=[
+                {
+                    "doc_id": "d1",
+                    "title": "文档",
+                    "page": 1,
+                    "text": "正文",
+                    "block_type": "p",
+                }
+            ]
+        ),
     )
 
     class _FakeSyn:
-        def __init__(self, llm_cfg):
+        def __init__(self):
             self.last_meta = None
 
         def answer_stream(self, q, ctx, aggregate=None, require_citation=True):
@@ -162,10 +186,14 @@ def test_query_stream_endpoint_event_sequence(monkeypatch):
 
             return _gen()
 
-    monkeypatch.setattr(api_main, "_pipeline", lambda: (cfg, retriever, rewriter))
-    monkeypatch.setattr("doc_rag.generate.synthesizer.Synthesizer", _FakeSyn)
+    syn = _FakeSyn()
+    monkeypatch.setattr(
+        api_main,
+        "_orchestrator",
+        lambda: Orchestrator(cfg, retriever=retriever, synthesizer=syn),
+    )
 
-    client = TestClient(api_main.app)
+    client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
     resp = client.post("/query/stream", json={"question": "测试问题"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")

@@ -1,13 +1,17 @@
-"""BGE-M3 dense embedding 客户端：OpenAI 兼容 /embeddings，批量 + 简单重试。"""
+"""BGE-M3 dense embedding 客户端：OpenAI 兼容 /embeddings，批量 + 统一重试判定。
+
+改造前这里对**所有**异常盲重试 3 次（含 401/400 这类永久错误），而同一时间
+`llm.py` 已经在按状态码分类——同一类 bug 修了一处留了一处。现在两处共用
+`net.request_with_retry`。
+"""
 
 from __future__ import annotations
 
-import time
-
 import httpx
 
+from ..net import request_with_retry
+
 _BATCH = 32
-_RETRIES = 3
 
 
 class Embedder:
@@ -15,6 +19,9 @@ class Embedder:
         self.base_url = emb_cfg["base_url"].rstrip("/")
         self.api_key = emb_cfg["api_key"]
         self.model = emb_cfg["model"]
+        # 维度不匹配必须在这里挡下：否则它一路走到 upsert，变成逐文档失败
+        # 沉进 stats["failed"]，1121 篇之后才发现
+        self.expected_dim = int(emb_cfg.get("dense_dim") or 0)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
@@ -23,19 +30,25 @@ class Embedder:
         return out
 
     def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        last_exc: Exception | None = None
-        for attempt in range(_RETRIES):
-            try:
-                r = httpx.post(
-                    f"{self.base_url}/embeddings",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"model": self.model, "input": batch},
-                    timeout=60.0,
-                )
-                r.raise_for_status()
-                data = r.json()["data"]
-                return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"embedding 请求失败（已重试 {_RETRIES} 次）：{last_exc}") from last_exc
+        def _once() -> list[list[float]]:
+            r = httpx.post(
+                f"{self.base_url}/embeddings",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={"model": self.model, "input": batch},
+                timeout=60.0,
+            )
+            r.raise_for_status()
+            data = r.json()["data"]
+            vectors = [
+                item["embedding"] for item in sorted(data, key=lambda x: x["index"])
+            ]
+            if self.expected_dim:
+                bad = [n for n, v in enumerate(vectors) if len(v) != self.expected_dim]
+                if bad:
+                    raise ValueError(
+                        f"{len(bad)}/{len(vectors)} 条向量维度不是 {self.expected_dim}"
+                        f"（首条 {len(vectors[bad[0]])}）——换嵌入模型必须 --recreate 重建 collection"
+                    )
+            return vectors
+
+        return request_with_retry(_once, label="embedding", attempts=3)

@@ -1,11 +1,18 @@
 """客观指标评估器（PLAN §5.3 双轨的确定性一轨）。
 
 指标（不依赖 LLM judge，可复现）：
-- Recall@5 / Recall@top_n：黄金来源文档是否被检回
-- MRR：首个命中来源的排名倒数
+- Hit@5 / Hit@8 / Hit@清单末：gold 来源文档的**首个**命中落在哪一位之前
+  （旧名 `recall_at_k` 是误称：64 条可答题里 44 条只有 1 篇 gold，剩下 20 条
+  gold 有 10~56 篇，在 8~25 槽位上真 Recall 不可能高，报出来的其实是命中率）
+- 文档覆盖率：逐条 `|命中∩gold| / |gold|` 再取均值——这才是真 Recall（macro）
+  它的结构上限 `coverage_ceiling_mean` 一起报，低于上限的差才是系统的真实空间
+- MRR：首个命中来源的排名倒数；nDCG@8：二值相关、按文档去重的整段排序质量
 - contains_acc：非拒答题答案包含全部 must_contain 关键词
-- refusal_acc：拒答题正确拒答（出现拒答语且未编造 must_contain）
-- citation_valid_rate：答案中 [n] 引用编号全部落在上下文范围内
+  （另有一路 `contains_acc_subseq`：字符子序列匹配，假阳性无上界，见
+  `_contains_as_subsequence`——它只在「与严格口径不同值」时才提供信息）
+- refusal_acc：拒答题答案出现拒答措辞（**只查措辞**，见 over_refusal 那条口径；
+  「拒答里有没有编造」另有一条独立检查，在 `eval/refusal.py` / `doc-rag audit-refusals`）
+- citation_valid_rate / citation_presence_rate
 - 延迟：分阶段（改写/检索/重排/合成/端到端）p50/p95/max，按题型拆分
 
 延迟口径（PLAN「延迟口径」）：合成耗时只在**缓存未命中**时才算延迟；命中缓存
@@ -18,7 +25,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -29,13 +35,25 @@ from ..generate import prompts
 from ..generate.llm import cache_enabled
 from ..generate.synthesizer import Synthesizer
 from ..ingest.embedder import Embedder
+from ..orchestrator import Orchestrator
 from ..retrieve.hybrid import HybridRetriever
-from ..retrieve.rewrite import QueryRewriter
+from ..retrieve.rewrite_llm import endpoint_model
+from .judge import judge_cfg
 from .schema import GoldItem
 
 _REFUSAL_MARKERS = [
-    "无法回答", "无法确定", "未形成决议", "未记载", "未提到", "没有提到",
-    "缺少", "没有足够", "未能找到", "根据现有文档", "没有讨论", "未讨论",
+    "无法回答",
+    "无法确定",
+    "未形成决议",
+    "未记载",
+    "未提到",
+    "没有提到",
+    "缺少",
+    "没有足够",
+    "未能找到",
+    "根据现有文档",
+    "没有讨论",
+    "未讨论",
 ]
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -44,9 +62,11 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", "", s or "")
 
 
-def _build_retriever(cfg: dict, collection: str | None) -> tuple[HybridRetriever, Synthesizer]:
+def _build_retriever(
+    cfg: dict, collection: str | None
+) -> tuple[HybridRetriever, Synthesizer]:
     retriever = HybridRetriever(
-        client=QdrantClient(url=cfg["qdrant"]["url"], timeout=60.0),
+        client=QdrantClient(url=cfg["qdrant"]["url"], timeout=60),
         embedder=Embedder(cfg["embedding"]),
         collection=collection or cfg["qdrant"]["collection"],
         retrieval_cfg=cfg["retrieval"],
@@ -54,24 +74,27 @@ def _build_retriever(cfg: dict, collection: str | None) -> tuple[HybridRetriever
     return retriever, Synthesizer(cfg["llm"])
 
 
-def _maybe_rerank(cfg: dict, question: str, results: list[dict], use_rerank: bool) -> list[dict]:
-    """重排（PLAN §7 Phase 2）：削减上下文噪声，Faithfulness 的主要手段。"""
-    if not use_rerank or not results:
-        return results
-    from ..retrieve.rerank import Reranker
+def _build_orchestrator(cfg: dict, collection: str | None):
+    """把 `_build_retriever` 的产物注入 Orchestrator。
 
-    try:
-        return Reranker(cfg["rerank"]).rerank(question, results)
-    except Exception:  # noqa: BLE001 重排失败不阻塞（退回融合顺序）
-        return results
+    eval 是顺序执行，复用同一个 Synthesizer 没有跨请求串台风险；测试也只需 patch
+    `_build_retriever` 这一处缝就能让整条链路离线。
+    """
+    retriever, synthesizer = _build_retriever(cfg, collection)
+    return Orchestrator(cfg, retriever=retriever, synthesizer=synthesizer)
 
 
 def _refusal_ok(answer: str) -> bool:
     return any(marker in answer for marker in _REFUSAL_MARKERS)
 
 
-def _contains_loose(keyword: str, answer: str) -> bool:
-    """宽松包含：关键词的字符按序出现即算命中（容忍「整理纪要」vs「整理会议纪要」）。"""
+def _contains_as_subsequence(keyword: str, answer: str) -> bool:
+    """字符子序列匹配：关键词的每个字按序出现即算命中。
+
+    比「整理纪要」vs「整理会议纪要」这种容忍更宽得多——假阳性**没有上界**：
+    「通过决议」能在一段毫无关系的话里命中（只要「通」「过」「决」「议」依次出现）。
+    名字里带 subsequence 而不是 loose，是为了让这层语义在报告里可见。
+    """
     pos = 0
     target = _norm(keyword)
     hay = _norm(answer)
@@ -108,16 +131,6 @@ def _ndcg_at_k(got_ids: list[str], relevant: set[str], k: int = 8) -> float | No
     return dcg / idcg
 
 
-def _contexts(results: list[dict], max_n: int | None = None) -> list[dict]:
-    """构造送 LLM 的编号上下文；max_n 控制上限以约束输入 token（PLAN §8 成本控制）。"""
-    if max_n:
-        results = results[:max_n]
-    return [
-        {"no": i + 1, "text": r["text"], "doc": r["title"] or r["doc_id"], "page": r["page"]}
-        for i, r in enumerate(results)
-    ]
-
-
 def _judge_contexts(ctx: list[dict]) -> list[str]:
     """judge 必须看到与 LLM 完全相同的上下文串（含 `[n]（文档名 第p页）` 前缀）。
 
@@ -133,37 +146,54 @@ def _judge_contexts(ctx: list[dict]) -> list[str]:
 def _retrieve_contexts(
     question: str,
     meta: dict,
-    retriever: HybridRetriever,
+    retriever: HybridRetriever | None,
     cfg: dict,
     aggregate: bool = False,
+    recorded: dict | None = None,
 ) -> list[dict]:
     """按 meta 记录的重检索参数重放检索，还原 LLM 实际看到的编号上下文。
 
     旧结果文件只存了正文；要补文档名必须重放**同一套**参数（改写 / 聚合 / 重排 /
     上下文上限），否则 judge 拿到的是另一批块——等于用 A 的上下文去判 B 的答案。
     meta.retrieval 形如 `dense+bm25+rrf[hybrid]+rewrite+rerank`。
+
+    改写自 W3 起由模型产出、不再可复现，因此重放只读条目里记下的 `rewritten`，
+    绝不当场重跑改写：拿新一次改写的结果去配旧答案，就是把度量对象换掉了。
     """
+    assert retriever is not None  # 只在需要重建时才构建（构建它要花钱）
     flags = meta.get("retrieval") or ""
-    use_rewrite = "+rewrite" in flags
     use_rerank = "+rerank" in flags
-    aggregate = aggregate or "+aggregate" in flags
-    # 检索模式已在 ragas_from_results 构建 retriever 前还原（dense/hybrid 构建时定死）
-    rewriter = QueryRewriter(cfg["retrieval"]) if use_rewrite else None
-    plan = (
-        rewriter.rewrite(question)
-        if rewriter
-        else {"rewritten": question, "filters": None, "aggregate": aggregate}
-    )
-    results = retriever.retrieve(
-        plan["rewritten"],
+    force_agg = aggregate or "+aggregate" in flags
+    recorded = recorded or {}
+    override: dict | None = None
+    if "+rewrite" in flags:
+        if not recorded.get("rewritten"):
+            raise ValueError(
+                f"条目「{question[:24]}…」的旧结果文件没记改写后的检索串，"
+                "而实时改写不可复现——不能拿另一条查询检索出的上下文去判旧答案。"
+                "请重跑 `doc-rag eval`。"
+            )
+        override = {
+            "rewritten": recorded["rewritten"],
+            "filters": recorded.get("rewrite_filters"),
+            "aggregate": bool(recorded.get("rewrite_aggregate")) or force_agg,
+            "top_n": None,
+            "reason": "重放已记录的改写结果",
+            "degraded": False,  # 重放不是「改写失败」，别把重放计成退化
+        }
+    result = Orchestrator(cfg, retriever=retriever, synthesizer=None).answer(
+        question,
         top_n=meta.get("top_n") or 8,
-        filters=plan["filters"],
-        aggregate=plan["aggregate"] or aggregate,
+        use_rewrite=False,
+        use_rerank=use_rerank,
+        force_aggregate=force_agg,
+        with_answer=False,
+        plan_override=override,
+        # 预算口径也要照原样重放：旧文件是 `budget: rewrite` 时，用固定 top_n
+        # 还原出来的上下文与 LLM 当时看到的那份不是同一批块。
+        honor_rewrite_budget=meta.get("budget") == "rewrite",
     )
-    results = _maybe_rerank(cfg, plan["rewritten"], results, use_rerank)
-    return _contexts(
-        results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
-    )
+    return result.contexts
 
 
 def evaluate(
@@ -172,6 +202,7 @@ def evaluate(
     collection: str | None = None,
     top_n: int = 8,
     limit: int | None = None,
+    sample: int | None = None,
     with_ragas: bool = False,
     with_answers: bool = True,
     mode: str | None = None,
@@ -181,99 +212,103 @@ def evaluate(
     require_citation: bool = True,
     ragas_sample: int | None = None,
     use_judge_cache: bool = True,
+    honor_rewrite_budget: bool = False,
+    judge_over: dict | None = None,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
         cfg["retrieval"]["mode"] = mode  # 消融开关：dense / hybrid
-    retriever, synthesizer = _build_retriever(cfg, collection)
-    rewriter = QueryRewriter(cfg["retrieval"]) if use_rewrite else None
+    orchestrator = _build_orchestrator(cfg, collection)
+    retriever = orchestrator.retriever  # 结果文件 meta 自证 collection / 检索模式用
     payload = json.loads(gold_file.read_text(encoding="utf-8"))
-    items_raw = payload["items"][:limit] if limit else payload["items"]
+    items_raw = payload["items"]
+    if limit:
+        items_raw = items_raw[:limit]
+    if sample:
+        # 抽样必须均匀：黄金集按题型分块排序，取前 N 条会整段漏掉末尾题型
+        # （cross_doc / time_filter 全在表尾）——RAGAS 轨当年就是这么漏的。
+        items_raw = _sample_rows(items_raw, sample)
     items = [GoldItem.model_validate(i) for i in items_raw]
 
     per_item: list[dict] = []
     for item in items:
-        t_item = time.perf_counter()
-        t0 = time.perf_counter()
-        plan = (
-            rewriter.rewrite(item.question)
-            if rewriter
-            else {"rewritten": item.question, "filters": None, "aggregate": aggregate, "top_n": None}
-        )
-        t_rewrite = time.perf_counter()
-        results = retriever.retrieve(
-            plan["rewritten"],
+        result = orchestrator.answer(
+            item.question,
             top_n=top_n,
-            filters=plan["filters"],
-            aggregate=plan["aggregate"] or aggregate,
+            use_rewrite=use_rewrite,
+            use_rerank=use_rerank,
+            force_aggregate=aggregate,
+            require_citation=require_citation,
+            with_answer=with_answers,
+            honor_rewrite_budget=honor_rewrite_budget,
         )
-        t_retrieve = time.perf_counter()
-        results = _maybe_rerank(cfg, plan["rewritten"], results, use_rerank)
-        t_rerank = time.perf_counter()
+        results = result.retrieved
+        ctx = result.contexts
         got_ids = [r["doc_id"] for r in results]
         hit_ranks = [got_ids.index(s) + 1 for s in item.source_doc_ids if s in got_ids]
         first_rank = min(hit_ranks) if hit_ranks else None
-        # 文档覆盖率：聚合题（答案集 5~30 篇）真正该量的指标
-        coverage = (
-            len(set(got_ids) & set(item.source_doc_ids)) / len(item.source_doc_ids)
-            if item.source_doc_ids
-            else None
-        )
-        ndcg = (
-            _ndcg_at_k(got_ids, set(item.source_doc_ids), k=8)
-            if item.source_doc_ids
-            else None
-        )
+        gold = set(item.source_doc_ids)
+        # 文档覆盖率：聚合题（答案集 5~56 篇）真正该量的指标——它就是逐条真 Recall
+        coverage = len(set(got_ids) & gold) / len(gold) if gold else None
+        # 同一清单长度下覆盖率的结构性上限：清单只有 8 格而 gold 有 56 篇时，
+        # 0.143 就是满分。不把这个数一起报出来，0.18 与 0.96 都会被读成同一回事。
+        coverage_ceiling = min(len(gold), len(results)) / len(gold) if gold else None
+        ndcg = _ndcg_at_k(got_ids, gold, k=8) if gold else None
 
-        ctx = _contexts(
-            results, max_n=int(cfg["retrieval"].get("max_contexts") or 0) or None
-        )
-        synth_meta: dict | None = None
-        if with_answers:
-            answer = synthesizer.answer(
-                item.question,
-                ctx,
-                require_citation=require_citation,
-                aggregate=bool(plan.get("aggregate") or aggregate),
-            )
-            # 计时从 Synthesizer 实例上取：answer() 的返回类型保持不变，
-            # 现有调用点与测试（Mock synthesizer）都不用改。
-            # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta。
-            candidate = getattr(synthesizer, "last_meta", None)
-            synth_meta = candidate if isinstance(candidate, dict) else None
-        else:
-            answer = ""
-        t_synth = time.perf_counter()
+        synth_meta = result.synth_meta
+        answer = result.answer
 
         if not with_answers:
             answered_ok = None  # 检索模式不评回答
-            answered_ok_loose = None
+            answered_ok_subseq = None
             over_refusal = None
         elif item.refusable:
             answered_ok = _refusal_ok(answer)
-            answered_ok_loose = answered_ok
+            answered_ok_subseq = answered_ok
             over_refusal = None
         elif item.must_contain:
             answered_ok = all(_norm(m) in _norm(answer) for m in item.must_contain)
-            answered_ok_loose = all(_contains_loose(m, answer) for m in item.must_contain)
-            # 过度拒答：声称无法回答，但上下文里其实含有关键信息
+            answered_ok_subseq = all(
+                _contains_as_subsequence(m, answer) for m in item.must_contain
+            )
+            # 过度拒答：声称无法回答，但上下文里其实含有关键信息。
+            # `not answered_ok` 是必须的：收紧后的 prompt 要求模型说明「文档里没记载
+            # 什么」，于是正确答案也常带拒答措辞。2026-09-19 全量重跑实测：被标记的
+            # 26 条**全部**答对（over_refusal_rate 0.406 是 100% 假阳性）。
+            # 一个恒真的指标比一个偏高的指标更糟——它会让人去修一个不存在的问题。
             ctx_text = _norm(" ".join(c["text"] for c in ctx))
             ctx_has = all(_norm(m) in ctx_text for m in item.must_contain)
-            over_refusal = bool(_refusal_ok(answer) and ctx_has)
+            over_refusal = bool(_refusal_ok(answer) and ctx_has and not answered_ok)
         else:
             answered_ok = None  # 无判据（如部分聚合题），不计入 answer 准确率
-            answered_ok_loose = None
+            answered_ok_subseq = None
             over_refusal = None
 
         refs = [int(n) for n in _CITATION_RE.findall(answer)]
         citation_valid = all(1 <= n <= len(ctx) for n in refs) if refs else None
         citation_present = bool(refs) if answer else None
 
+        # 过度拒答的第二条口径：gold 文档已经**进了上下文**，答案却说「无法回答」。
+        # 上面的 `over_refusal` 要求 must_contain 逐字出现在块里，因而漏掉一整类
+        # 真过度拒答——检回了正确文档、但那块没含那句原话。2026-09-19 全量实测：
+        # q018/q026/q034 首命中在第 1/3/2 位、doc_coverage=1.0，答案仍是
+        # 「根据现有文档无法回答」，而 `over_refusal_rate` 报 0.0。
+        # 两条都报：`over_refusal_rate` 是「上下文含原话」口径，
+        # `over_refusal_gold_rate` 是「正确文档已进上下文」口径。
+        ctx_doc_ids = {c["doc_id"] for c in result.citations}
+        over_refusal_gold = (
+            None
+            if (not with_answers or not answer or item.refusable)
+            else bool(
+                answered_ok is False and _refusal_ok(answer) and (ctx_doc_ids & gold)
+            )
+        )
+
         # 逐条用量（T5）：延迟数字此前只记耗时没记用量，无法解释「term 单条 28s
         # 但答案仅 308 字」——reasoning token 与耗时必须能对上号。缓存命中时
         # usage 为 None（缓存的答案当时没记用量），合计时按缺失跳过。
         usage = None
-        if isinstance(synth_meta, dict):
+        if synth_meta:
             u = {
                 k: synth_meta.get(k)
                 for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
@@ -281,6 +316,7 @@ def evaluate(
             if any(v is not None for v in u.values()):
                 usage = u
 
+        lat = result.latency_ms
         per_item.append(
             {
                 "id": item.id,
@@ -288,66 +324,138 @@ def evaluate(
                 "question": item.question,
                 "first_hit_rank": first_rank,
                 "doc_coverage": round(coverage, 4) if coverage is not None else None,
+                "doc_coverage_ceiling": (
+                    round(coverage_ceiling, 4) if coverage_ceiling is not None else None
+                ),
                 "ndcg_at_8": round(ndcg, 4) if ndcg is not None else None,
                 "n_source_docs": len(item.source_doc_ids),
+                # 清单与上下文的长度必须逐条可见：消融臂之间若清单不等长，
+                # hit/nDCG/覆盖率的差就部分是长度的函数（重排以前正是如此）。
+                "n_retrieved": len(results),
+                "n_contexts": len(ctx),
+                "top_n_used": result.top_n_used,
+                "rewrite_top_n": result.rewrite_top_n,
+                "filter_applied": result.filter_applied,
+                "filter_fallback": result.filter_fallback,
                 "answered_ok": answered_ok,
-                "answered_ok_loose": answered_ok_loose,
+                "answered_ok_subseq": answered_ok_subseq,
                 "over_refusal": over_refusal,
+                "over_refusal_gold": over_refusal_gold,
                 "citation_valid": citation_valid,
                 "citation_present": citation_present,
                 "n_citations": len(refs),
                 "answer": answer,
+                "rerank_error": result.rerank_error,
+                # 改写结果必须随条目落盘：改写自 W3 起由模型产出、不可复现，
+                # 事后重放检索还原 judge 上下文时只能读这里记下的那一条。
+                "rewritten": result.plan["rewritten"],
+                "rewrite_filters": result.plan["filters"],
+                "rewrite_aggregate": bool(result.plan["aggregate"]),
+                "rewrite_degraded": bool(result.plan.get("degraded")),
                 "contexts": _judge_contexts(ctx),
                 "latency": {
-                    "rewrite": round((t_rewrite - t0) * 1000, 1),
-                    "retrieve": round((t_retrieve - t_rewrite) * 1000, 1),
-                    "rerank": round((t_rerank - t_retrieve) * 1000, 1),
+                    "rewrite": lat["rewrite"],
+                    "retrieve": lat["retrieve"],
+                    "rerank": lat["rerank"],
                     # 检索侧不含 LLM：这部分与模型无关，换模型不必重测
-                    "retrieval_total": round((t_rerank - t0) * 1000, 1),
-                    "synthesize": (synth_meta or {}).get("ms") if with_answers else None,
-                    "synth_cached": bool((synth_meta or {}).get("cached")) if with_answers else None,
+                    "retrieval_total": lat["retrieval_total"],
+                    "synthesize": lat["synthesize"],
+                    "synth_cached": lat["synth_cached"],
                     "usage": usage,
-                    "total": round((t_synth - t_item) * 1000, 1),
+                    "total": lat["total"],
                 },
             }
         )
 
-    # 聚合（no_answer 题无来源文档，不计入 Recall/MRR 分母，由 refusal_acc 单独评）
-    with_source = [
-        r for r in per_item if not _is_refusable(items, r["id"])
-    ]
-    hits5 = [r for r in with_source if r["first_hit_rank"] and r["first_hit_rank"] <= 5]
-    hitsN = [r for r in with_source if r["first_hit_rank"]]
+    # 聚合（no_answer 题无来源文档，不计入分母，由 refusal_acc 单独评）
+    with_source = [r for r in per_item if not _is_refusable(items, r["id"])]
     mrr_scores = [1.0 / r["first_hit_rank"] for r in with_source if r["first_hit_rank"]]
     ndcg_scores = [r["ndcg_at_8"] for r in with_source if r["ndcg_at_8"] is not None]
+    covs = [r["doc_coverage"] for r in per_item if r["doc_coverage"] is not None]
+    ceilings = [
+        r["doc_coverage_ceiling"]
+        for r in per_item
+        if r["doc_coverage_ceiling"] is not None
+    ]
+
+    def _hit_rate(k: int | None) -> float | None:
+        """首命中落在前 k 位的条目占比；`k=None` = 整条清单内任一位。
+
+        这量的是「找没找到」，不是「找全没有」——找全的程度看 `mean_doc_coverage`。
+        """
+        if not with_source:
+            return None
+        n = sum(
+            1
+            for r in with_source
+            if r["first_hit_rank"] and (k is None or r["first_hit_rank"] <= k)
+        )
+        return round(n / len(with_source), 4)
+
+    def _mean_by_type(key: str) -> dict[str, float]:
+        """按题型取均值；**没有值的题型一个 key 都不建**。
+
+        给 `no_answer`（按定义无 gold、覆盖率恒 None）编一个 0.0，就是把「未定义」
+        印成「测出来是 0」——和那个恒真的 over_refusal 是同一类错误。
+        """
+        out: dict[str, float] = {}
+        for t in sorted({r["type"] for r in per_item}):
+            vals = [r[key] for r in per_item if r["type"] == t and r[key] is not None]
+            if vals:
+                out[t] = round(sum(vals) / len(vals), 4)
+        return out
+
     scorable = [
-        r for r in per_item
+        r
+        for r in per_item
         if not _is_refusable(items, r["id"]) and r["answered_ok"] is not None
     ]
     refusables = [r for r in per_item if _is_refusable(items, r["id"])]
     cites = [r for r in per_item if r["citation_valid"] is not None]
 
-    covs = [r["doc_coverage"] for r in per_item if r["doc_coverage"] is not None]
-
+    lens = [r["n_retrieved"] for r in per_item]
     summary = {
         "n_items": len(per_item),
-        "recall_at_5": len(hits5) / len(with_source),
-        f"recall_at_{top_n}": len(hitsN) / len(with_source),
+        "hit_at_5": _hit_rate(5),
+        "hit_at_8": _hit_rate(8),
+        "hit_within_budget": _hit_rate(None),
         "mrr": sum(mrr_scores) / len(with_source),
-        # nDCG@8（二值相关，doc 去重）：整段排序质量，与 recall/mrr 同分母
-        "ndcg_at_8": round(sum(ndcg_scores) / len(ndcg_scores), 4) if ndcg_scores else None,
+        # nDCG@8（二值相关，doc 去重）：整段排序质量，与 hit/mrr 同分母
+        "ndcg_at_8": round(sum(ndcg_scores) / len(ndcg_scores), 4)
+        if ndcg_scores
+        else None,
+        # 逐条真 Recall（macro）。它必须和自己的上限一起读：清单 8 格、gold 56 篇
+        # 的那种条目，覆盖率上限就是 0.143。
         "mean_doc_coverage": round(sum(covs) / len(covs), 4) if covs else None,
+        "coverage_ceiling_mean": round(sum(ceilings) / len(ceilings), 4)
+        if ceilings
+        else None,
+        "coverage_by_type": _mean_by_type("doc_coverage"),
+        "coverage_ceiling_by_type": _mean_by_type("doc_coverage_ceiling"),
+        # 两臂可比性的自证：清单长度必须逐条落盘，不然「有重排」臂悄悄短一截
+        "list_len": {
+            "retrieved_min": min(lens) if lens else None,
+            "retrieved_max": max(lens) if lens else None,
+            "contexts_min": min((r["n_contexts"] for r in per_item), default=None),
+            "contexts_max": max((r["n_contexts"] for r in per_item), default=None),
+        },
         "contains_acc": _safe_div(
             sum(1 for r in scorable if r["answered_ok"]), len(scorable)
         ),
-        # 宽松包含（容忍改写）：与严格值一起看，差值即「度量伪影」大小
-        "contains_acc_loose": _safe_div(
-            sum(1 for r in scorable if r["answered_ok_loose"]), len(scorable)
+        # 字符子序列口径（见 `_contains_as_subsequence`）：与严格值一起看，差值即度量
+        # 口径的松紧。2026-09-19 全量实测两者**同值**（都 0.8438）→ 这一路当前不提供信息，
+        # 留着是因为它能证伪「严格口径在惩罚措辞改写」，不是因为它是独立信号。
+        "contains_acc_subseq": _safe_div(
+            sum(1 for r in scorable if r["answered_ok_subseq"]), len(scorable)
         ),
-        # 过度拒答：上下文含关键信息却答「无法回答」
+        # 过度拒答：两条口径，缺任何一条都会把问题看漏一半
         "over_refusal_rate": _safe_div(
             sum(1 for r in per_item if r["over_refusal"]),
             sum(1 for r in per_item if r["over_refusal"] is not None),
+        ),
+        "over_refusal_gold_rate": _safe_div(
+            sum(1 for r in per_item if r["over_refusal_gold"]),
+            sum(1 for r in per_item if r["over_refusal_gold"] is not None),
         ),
         "refusal_acc": _safe_div(
             sum(1 for r in refusables if r["answered_ok"]), len(refusables)
@@ -360,14 +468,6 @@ def evaluate(
             sum(1 for r in per_item if r["citation_present"]),
             sum(1 for r in per_item if r["citation_present"] is not None),
         ),
-        "coverage_by_type": {
-            t: round(
-                sum(r["doc_coverage"] for r in per_item if r["type"] == t and r["doc_coverage"] is not None)
-                / max(sum(1 for r in per_item if r["type"] == t and r["doc_coverage"] is not None), 1),
-                4,
-            )
-            for t in sorted({r["type"] for r in per_item})
-        },
     }
     latency = _latency_summary(per_item)
     if latency:
@@ -377,23 +477,75 @@ def evaluate(
     # 当年就死在这里。指纹按生效版本算，两个版本指纹必然不同。
     llm_section = cfg.get("llm") or {}
     prompt_version = llm_section.get("prompt_version") or prompts.DEFAULT_PROMPT_VERSION
+    # 重排失败必须改口径，不能让结果文件继续自称「+rerank」：改造前 `_maybe_rerank`
+    # 把所有异常吞成「退回融合顺序」，于是一次重排服务抖动就产出一份
+    # 自称 A 组、实为 B 组的评估——正是 README 里宣布已消灭的那类度量伪影。
+    rerank_failed = sum(1 for r in per_item if r.get("rerank_error"))
+    if use_rerank and per_item and rerank_failed == len(per_item):
+        raise ValueError(
+            f"{len(per_item)} 条全部重排失败（首条：{per_item[0]['rerank_error']}）——"
+            "本轮实际是「无重排」组，不能标成 +rerank 使用；修好 rerank 服务后重跑。"
+        )
+    # 改写失败会静默退化成「不改写」（对用户是对的：不该让一次分类拖死问答），
+    # 但对评估是另一回事：一条自称 +rewrite 的臂里混进 N 条没改写的条目，
+    # 就是在拿混合条件跟纯改写条件比。超时预算（rewrite.timeout_s）让这条路径
+    # 在真实抖动下会被走到，所以必须计数而不是靠人回忆。
+    rewrite_degraded = sum(1 for r in per_item if r.get("rewrite_degraded"))
+    if use_rewrite and per_item and rewrite_degraded == len(per_item):
+        raise ValueError(
+            f"{len(per_item)} 条改写全部退化（未生效）——本轮实际是「无改写」组，"
+            "不能标成 +rewrite 使用；先修改写（见 doc-rag check-rewrite）。"
+        )
+
+    # 过滤回退必须计数：字段稀疏时它会整条丢掉过滤（并多付一次检索延迟）。
+    # 一条自称「带元数据过滤」的臂里混进 N 条没过滤的条目，覆盖率就不是那个机制的
+    # 效果了——和 rerank_failed / rewrite_degraded 是同一类自证。
+    filter_fallback_n = sum(1 for r in per_item if r.get("filter_fallback"))
 
     ragas_summary = None
     if with_ragas:
         ragas_summary = _run_ragas(
-            _ragas_rows(items, per_item), cfg, sample_n=ragas_sample,
+            _ragas_rows(items, per_item),
+            cfg,
+            sample_n=ragas_sample,
             use_cache=use_judge_cache,
+            judge_over=judge_over,
         )
 
     results = {
         "meta": {
             "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
             "top_n": top_n,
+            # 预算口径必须自证：`fixed:8` 下所有题都只取 8 块（连聚合题也是），
+            # 而生产路径听改写的建议（聚合题 25）。以前 eval 只能测前者，
+            # 于是「聚合题放宽预算」这条生产行为从来没被任何数字量过。
+            "budget": "rewrite" if honor_rewrite_budget else f"fixed:{top_n}",
+            "context_budget": {
+                "max_contexts": int(
+                    (cfg.get("retrieval") or {}).get("max_contexts") or 0
+                )
+                or None,
+                "rerank_top_n": int((cfg.get("rerank") or {}).get("top_n") or 0) or None
+                if use_rerank
+                else None,
+            },
             "collection": retriever.collection,
             "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
             + ("+aggregate" if aggregate else "")
+            # 与 +rerank 的规则故意不同：这条串还是**重放**的输入（`_retrieve_contexts`
+            # 靠 `+rewrite` 决定「必须读记录的改写串」），部分退化时把它抹掉会让重放
+            # 拿原始问题去配旧答案。退化条数靠下面的 rewrite_degraded 逐条追。
             + ("+rewrite" if use_rewrite else "")
-            + ("+rerank" if use_rerank else ""),
+            + ("+rerank" if use_rerank and not rerank_failed else ""),
+            # 部分失败时逐条 rerank_error 可追；全失败直接中止（见下）
+            "rerank_failed": rerank_failed if use_rerank else None,
+            # 改写侧同款自证：退化条数（0 才是干净的 +rewrite 臂）+ 哪个模型做的改写
+            # （改写可以与合成不同源，只记 llm_model 会把改写的归属记错）
+            "rewrite_degraded": rewrite_degraded if use_rewrite else None,
+            "rewrite_model": endpoint_model(cfg) if use_rewrite else None,
+            # 有多少条其实没带着过滤跑完（0 才是干净的「过滤生效」臂）
+            "filter_fallback_n": filter_fallback_n,
+            "filters_applied_n": sum(1 for r in per_item if r.get("filter_applied")),
             "with_answers": with_answers,
             # 让结果文件自证身份：延迟数字曾因「不知道是哪个模型、缓存开没开」
             # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
@@ -423,8 +575,12 @@ def _quantiles(values: list[float], ns: tuple[float, ...] = (50, 95)) -> dict:
     xs = sorted(v for v in values if v is not None)
     if not xs:
         return {}
-    out = {"n": len(xs), "min": round(xs[0], 1), "max": round(xs[-1], 1),
-           "mean": round(sum(xs) / len(xs), 1)}
+    out = {
+        "n": len(xs),
+        "min": round(xs[0], 1),
+        "max": round(xs[-1], 1),
+        "mean": round(sum(xs) / len(xs), 1),
+    }
     for n in ns:
         idx = max(0, min(len(xs) - 1, math.ceil(n / 100 * len(xs)) - 1))
         out[f"p{int(n)}"] = round(xs[idx], 1)
@@ -444,13 +600,19 @@ def _latency_summary(per_item: list[dict]) -> dict | None:
     rows = [r for r in per_item if r.get("latency")]
     if not rows:
         return None
-    uncached = [r for r in rows if r["latency"].get("synthesize") is not None
-                and not r["latency"].get("synth_cached")]
+    uncached = [
+        r
+        for r in rows
+        if r["latency"].get("synthesize") is not None
+        and not r["latency"].get("synth_cached")
+    ]
     stages = ("rewrite", "retrieve", "rerank", "retrieval_total")
     summary: dict = {
         "unit": "ms",
         # 检索侧与 LLM 无关（实测换模型完全一致），全部条目都算
-        "by_stage": {s: _quantiles([r["latency"].get(s) for r in rows]) for s in stages},
+        "by_stage": {
+            s: _quantiles([r["latency"].get(s) for r in rows]) for s in stages
+        },
         "synthesize": _quantiles([r["latency"].get("synthesize") for r in uncached]),
         "synthesize_n_uncached": len(uncached),
         "total": _quantiles([r["latency"].get("total") for r in rows]),
@@ -477,7 +639,9 @@ def _latency_summary(per_item: list[dict]) -> dict | None:
         sub_uncached = [r for r in uncached if r["type"] == t]
         summary["by_type"][t] = {
             "n": len(sub),
-            "synthesize": _quantiles([r["latency"].get("synthesize") for r in sub_uncached]),
+            "synthesize": _quantiles(
+                [r["latency"].get("synthesize") for r in sub_uncached]
+            ),
             "total": _quantiles([r["latency"].get("total") for r in sub]),
             # 答案长度是延迟的主因（实测），不报它就无法解释聚合题为何慢
             "answer_chars_mean": round(
@@ -550,12 +714,15 @@ def _make_token_counter():
                 reasoning = 0
                 for gen_list in getattr(response, "generations", None) or []:
                     for gen in gen_list:
-                        meta = getattr(getattr(gen, "message", None), "usage_metadata", None)
+                        meta = getattr(
+                            getattr(gen, "message", None), "usage_metadata", None
+                        )
                         if not meta:
                             continue
                         usage = meta  # 多代时取最后一份，但 reasoning 要累加
                         reasoning += int(
-                            (meta.get("output_token_details") or {}).get("reasoning") or 0
+                            (meta.get("output_token_details") or {}).get("reasoning")
+                            or 0
                         )
             self.prompt_tokens += int(
                 usage.get("prompt_tokens") or usage.get("input_tokens") or 0
@@ -578,23 +745,38 @@ def _make_token_counter():
     return _TokenCounter()
 
 
-def _judge_chat_kwargs(cfg: dict) -> dict:
+def _judge_chat_kwargs(cfg: dict, judge: dict | None = None) -> dict:
     """judge 的统一构造参数（`_run_ragas` 与 `probe-judge` 必须同源，否则探针看到的行为
-    和正式判分不一致——这正是当初定位口径 bug 时踩过的坑）。"""
-    llm_cfg = cfg["llm"]
+    和正式判分不一致——这正是当初定位口径 bug 时踩过的坑）。
+
+    endpoint 由 `eval/judge.py` 装配：默认继承生成侧 `llm`，`eval.judge.*` 或调用方传的
+    `judge` 覆盖可以换到另一家供应商（跨供应商复判，PLAN「judge 自偏」）。
+    """
+    built = judge_cfg(cfg, **(judge or {}))
     kwargs: dict = {
-        "model": llm_cfg["model"],
-        "base_url": llm_cfg["base_url"],
-        "api_key": llm_cfg["api_key"],
-        "temperature": 0,
+        "model": built["model"],
+        "base_url": built["base_url"],
+        "api_key": built["api_key"],
+        "temperature": built["temperature"],
     }
     # judge 的两个子任务（拆陈述 / 逐条判定）几乎不需要思考，但推理型模型会把
     # 输出预算的 97% 花在看不见的 reasoning token 上（实测单次 1554 → 79，全量 10.4×）。
-    # 同一个模型、只关思考，不改 judge 身份，不破坏 §5.3 的 judge 固定口径。
-    effort = (cfg.get("eval", {}).get("judge") or {}).get("reasoning_effort")
-    if effort:
-        kwargs["reasoning_effort"] = effort
+    if built.get("reasoning_effort"):
+        kwargs["reasoning_effort"] = built["reasoning_effort"]
+    if built.get("timeout_s"):
+        kwargs["timeout"] = built["timeout_s"]
     return kwargs
+
+
+def _judge_identity(cfg: dict, judge: dict | None) -> dict:
+    """判分产物必须自证是**谁**判的：换 judge 就是换度量身份，混用比没有更糟。"""
+    built = judge_cfg(cfg, **(judge or {}))
+    return {
+        "model": built["model"],
+        "base_url": (built.get("base_url") or "").split("//")[-1].split("/")[0],
+        "cross_vendor": built.get("base_url") != (cfg.get("llm") or {}).get("base_url"),
+        "reasoning_effort": built.get("reasoning_effort"),
+    }
 
 
 def _run_ragas(
@@ -603,12 +785,15 @@ def _run_ragas(
     sample_n: int | None = None,
     use_cache: bool = True,
     total: int | None = None,
+    judge_over: dict | None = None,
 ) -> dict | None:
     """RAGAS 第二轨：rows=[{id,type,user_input,response,retrieved_contexts}] → judge 指标。
 
     可信度口径（PLAN §5.3）：judge 固定模型、temperature=0；只看与客观指标的相对一致性。
     `use_cache=False` 用于测 judge 自身的运行间随机性（temperature=0 也不保证跨请求逐字复现）。
     `total`：调用方已自行抽样时传入抽样前的总数，保证报告口径（n_answerable_total / sampled）准确。
+    `judge_over`：`model` / `base_url` / `api_key` 任一非空即是一次跨供应商复判；**换 judge
+    就是换度量身份**，所以是谁判的必须写进产物 meta，不能只留在命令行历史里。
     """
     try:
         from langchain.globals import set_llm_cache
@@ -648,13 +833,18 @@ def _run_ragas(
         set_llm_cache(None)  # 显式关缓存：set_llm_cache 是进程级全局，必须清掉
 
     # 指标可选（PLAN §8 成本控制）：AnswerRelevancy 在中文场景噪声大且需嵌入调用
-    wanted = [m.lower() for m in (cfg.get("eval", {}).get("ragas_metrics") or ["faithfulness"])]
+    wanted = [
+        m.lower()
+        for m in (cfg.get("eval", {}).get("ragas_metrics") or ["faithfulness"])
+    ]
     metric_map = {"faithfulness": Faithfulness(), "answer_relevancy": AnswerRelevancy()}
     metrics = [metric_map[m] for m in wanted if m in metric_map]
     if not metrics:
         return {"skipped": f"未配置有效指标：{wanted}"}
 
-    judge = LangchainLLMWrapper(ChatOpenAI(**_judge_chat_kwargs(cfg), max_retries=0))
+    judge = LangchainLLMWrapper(
+        ChatOpenAI(**_judge_chat_kwargs(cfg, judge_over), max_retries=0)
+    )
     # AnswerRelevancy 需要嵌入模型：用 SiliconFlow 的 BGE-M3（DeepSeek 无 embedding API）
     emb_cfg = cfg["embedding"]
     embeddings = LangchainEmbeddingsWrapper(
@@ -692,6 +882,7 @@ def _run_ragas(
             "n_answerable_total": all_n,
             "sampled": sample_n if 0 < sample_n < all_n else None,
             "judge_cache": judge_cache_path,
+            "judge": _judge_identity(cfg, judge_over),
             "metrics": [m.name for m in metrics],
             "token_usage": counter.as_dict(),
         }
@@ -702,7 +893,9 @@ def _run_ragas(
                 if m.name in df.columns and idx < len(df):
                     val = df[m.name].iloc[idx]
                     entry[m.name] = (
-                        None if val is None or math.isnan(float(val)) else round(float(val), 4)
+                        None
+                        if val is None or math.isnan(float(val))
+                        else round(float(val), 4)
                     )
             per_item.append(entry)
         for m in metrics:
@@ -773,7 +966,11 @@ def probe_judge(results_file: Path, item_id: str, cfg: dict | None = None) -> di
         verdicts = await metric._create_verdicts(row, stmts.statements, [])
         return {
             "statements": [
-                {"statement": v.statement, "verdict": bool(v.verdict), "reason": v.reason}
+                {
+                    "statement": v.statement,
+                    "verdict": bool(v.verdict),
+                    "reason": v.reason,
+                }
                 for v in verdicts.statements
             ],
             "score": metric._compute_score(verdicts),
@@ -799,6 +996,7 @@ def ragas_from_results(
     sample_n: int | None = None,
     use_cache: bool = True,
     out_file: Path | None = None,
+    judge_over: dict | None = None,
 ) -> dict | None:
     """对已保存的评估结果补跑 RAGAS：答案复用，上下文过期时按需重检索还原。
 
@@ -813,7 +1011,9 @@ def ragas_from_results(
     cfg = cfg or load_config()
     data = json.loads(results_file.read_text(encoding="utf-8"))
     meta = data.get("meta") or {}
-    candidates = [i for i in data["items"] if i["type"] != "no_answer" and i.get("answer")]
+    candidates = [
+        i for i in data["items"] if i["type"] != "no_answer" and i.get("answer")
+    ]
 
     resolved_n = sample_n
     if resolved_n is None:
@@ -830,7 +1030,11 @@ def ragas_from_results(
         replay_cfg["retrieval"] = dict(cfg.get("retrieval") or {})
         if mode_match:
             replay_cfg["retrieval"]["mode"] = mode_match.group(1)
-    retriever = _build_retriever(replay_cfg, meta.get("collection"))[0] if needs_rebuild else None
+    retriever = (
+        _build_retriever(replay_cfg, meta.get("collection"))[0]
+        if needs_rebuild
+        else None
+    )
 
     rows = []
     rebuilt = 0
@@ -838,7 +1042,9 @@ def ragas_from_results(
     for raw in picked:
         contexts = raw.get("contexts")
         if _legacy_contexts(contexts):
-            ctx = _retrieve_contexts(raw["question"], meta, retriever, cfg)
+            ctx = _retrieve_contexts(
+                raw["question"], meta, retriever, cfg, recorded=raw
+            )
             # 自检：重放检索必须逐字复现旧文件里的正文，否则等于换了上下文再判分
             stored = [_norm(c) for c in (contexts or [])]
             got = [_norm(c["text"]) for c in ctx]
@@ -864,18 +1070,29 @@ def ragas_from_results(
             f"请重新执行 `doc-rag eval` 生成与答案同源的上下文后再补跑 RAGAS。"
         )
     summary = _run_ragas(
-        rows, cfg, sample_n=resolved_n, use_cache=use_cache, total=len(candidates)
+        rows,
+        cfg,
+        sample_n=resolved_n,
+        use_cache=use_cache,
+        total=len(candidates),
+        judge_over=judge_over,
     )
     if summary is None:
         return None
     summary["contexts_rebuilt"] = rebuilt
+    # judge 身份在这里独立算，不去读 `_run_ragas` 的返回：那条函数可能被调用方桩掉，
+    # 而「谁判的」不该依赖判分是否成功才有值。
+    ident = _judge_identity(cfg, judge_over)
     payload = {
         "meta": {
             "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
             "source_results": results_file.name,
             "collection": meta.get("collection"),
             "retrieval": meta.get("retrieval"),
-            "judge_model": cfg["llm"]["model"],
+            "judge_model": ident["model"],
+            "judge_base_url": ident["base_url"],
+            "judge_cross_vendor": ident["cross_vendor"],
+            "judge_reasoning_effort": ident["reasoning_effort"],
             "judge_temperature": 0,
             "judge_cache": use_cache,
         },

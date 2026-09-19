@@ -3,7 +3,9 @@ from doc_rag.ingest.schema import Block, IntermediateDoc, SourceMeta
 
 
 def _doc(blocks: list[Block]) -> IntermediateDoc:
-    return IntermediateDoc(meta=SourceMeta(source_type="docx", doc_id="t1"), blocks=blocks)
+    return IntermediateDoc(
+        meta=SourceMeta(source_type="docx", doc_id="t1"), blocks=blocks
+    )
 
 
 def test_table_is_never_merged_with_prose():

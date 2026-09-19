@@ -1,9 +1,9 @@
 [project]
 name = "doc-rag"
 version = "0.1.0"
-description = "企业文档 RAG：飞书 / Office / PDF 多源接入 · BGE-M3 Dense+Sparse · 评估闭环（设计见 PLAN.md）"
+description = "企业文档 RAG：PDF / Office 手动迁移接入 · BGE-M3 Dense+Sparse · 评估闭环（设计见 docs/design/PLAN.md）"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"  # 与 .python-version / CI 钉的 3.12 对齐
 dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
@@ -49,6 +49,7 @@ packages = ["src/doc_rag"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 # 国内镜像（直连 PyPI 超时）；换源可改 url
@@ -61,3 +62,17 @@ default = true
 addopts = "--basetemp=.pytest_tmp"
 
 
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+# 渐进式基线：CI 已经对 src 跑 mypy。下列模块仍有历史类型空洞，
+# 逐条列出来当**只能缩短**的清单——新代码不在这里就必须过。
+[[tool.mypy.overrides]]
+module = [
+    "doc_rag.eval.runner",
+    "doc_rag.ingest.pdf",
+    "doc_rag.ingest.profile",
+    "doc_rag.retrieve.hybrid",
+]
+ignore_errors = true

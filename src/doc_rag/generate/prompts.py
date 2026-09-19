@@ -41,7 +41,10 @@ _BASELINE_ANSWER = """\
 
 # 合成 system prompt 的版本注册表。SYSTEM_ANSWER（上方）保持指向收紧版，
 # 所有直接引用它的既有调用点行为不变；按版本选 prompt 走 resolve_system_answer()。
-ANSWER_PROMPTS: dict[str, str] = {"tightened": SYSTEM_ANSWER, "baseline": _BASELINE_ANSWER}
+ANSWER_PROMPTS: dict[str, str] = {
+    "tightened": SYSTEM_ANSWER,
+    "baseline": _BASELINE_ANSWER,
+}
 
 DEFAULT_PROMPT_VERSION = "tightened"
 
@@ -56,7 +59,9 @@ def resolve_system_answer(
     """
     version = prompt_version or DEFAULT_PROMPT_VERSION
     if version not in ANSWER_PROMPTS:
-        raise KeyError(f"未知 prompt 版本：{version!r}（可选：{sorted(ANSWER_PROMPTS)}）")
+        raise KeyError(
+            f"未知 prompt 版本：{version!r}（可选：{sorted(ANSWER_PROMPTS)}）"
+        )
     return ANSWER_PROMPTS[version] if require_citation else SYSTEM_ANSWER_NO_CITE
 
 

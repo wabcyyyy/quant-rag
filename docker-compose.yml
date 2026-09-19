@@ -1,10 +1,15 @@
 services:
   qdrant:
-    # 需要 ≥1.15（内置 qdrant/bm25 稀疏模型，PLAN §5.2）；升级时锁定具体 tag
-    # Docker Hub 直连超时的机器，先手动拉镜像再 compose up：
-    #   docker pull docker.m.daocloud.io/qdrant/qdrant:latest
-    #   docker tag docker.m.daocloud.io/qdrant/qdrant:latest qdrant/qdrant:latest
-    image: qdrant/qdrant:latest
+    # 需要 ≥1.15（内置 qdrant/bm25 稀疏模型，PLAN §5.2）；锁定 v1.19.1：hybrid.py 的
+    # prefetch+RRF 行为按该版本实测。
+    # ⚠️ tag 必须带 `v` 前缀——Docker Hub 上没有 `qdrant/qdrant:1.19.1` 这个标签，
+    #    写错时本地容器还在跑所以毫无察觉，而 clone 出来的第一条
+    #    `docker compose up -d` 直接 "failed to resolve reference" 失败（2026-09-19 踩过）。
+    #    `doc-rag check` 会把跑着的 Qdrant 版本与这里的钉版对一遍。
+    # Docker Hub 直连超时的机器，先手动拉同一版本再 compose up：
+    #   docker pull docker.m.daocloud.io/qdrant/qdrant:v1.19.1
+    #   docker tag docker.m.daocloud.io/qdrant/qdrant:v1.19.1 qdrant/qdrant:v1.19.1
+    image: qdrant/qdrant:v1.19.1
     ports:
       - "6333:6333"
       - "6334:6334"

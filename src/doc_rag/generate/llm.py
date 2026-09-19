@@ -19,13 +19,18 @@ import os
 import sqlite3
 import threading
 import time
-from pathlib import Path
 
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import APIConnectionError, OpenAI
+
+from ..config import project_root
+from ..net import is_retryable
 
 _RETRIES = 4
 _BACKOFF_BASE = 2.0  # 秒；免费档 429 常见，退避要够长
-_CACHE_PATH = Path(__file__).resolve().parents[3] / ".cache" / "llm_cache.sqlite"
+_DEFAULT_TIMEOUT_S = 180.0  # 合成侧现实：推理型模型一条聚合题能生成到几十秒
+# 缓存/配置都锚在项目根：parents[3] 只在 editable 安装下成立，
+# 装成 wheel 后缓存会掉进 site-packages，形同没有缓存
+_CACHE_PATH = project_root() / ".cache" / "llm_cache.sqlite"
 # 计费口径：缓存命中不产生调用，所以只累加真实 API 调用的 token。
 # reasoning 单列——推理型模型把输出预算大部分花在看不见的思考上（实测 judge 占 97%），
 # 不单列就会像 PLAN 早先那样按「可见文本长度」估成本，低估一个数量级。
@@ -39,18 +44,23 @@ _STATS = {
     "cache_read_errors": 0,
     "cache_write_errors": 0,
 }
-_LOCK = threading.Lock()
+# 可重入：`_bump` 自己上锁，而它可能被已经持锁的辅助函数调用。
+# 用普通 Lock 时这种嵌套会直接死锁（本仓库踩过：改成统一 `_bump` 后
+# 调用点残留的 `with _LOCK` 把 chat_timed 钉死，测试挂在第一个用例上不动了）。
+_LOCK = threading.RLock()
 
-# 只重试瞬时错误。此前无差别重试 4 次 × SDK 默认重试 2 次 = 最多 12 次传输，
-# 401/400 这类永久错误也会被白白打满
-_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+# 只重试瞬时错误。判定表在 net.py 与嵌入/重排共用一份——此前无差别重试
+# 4 次 × SDK 默认重试 2 次 = 最多 12 次传输，401/400 这类永久错误也被白白打满
 
 
-def _is_retryable(exc: BaseException) -> bool:
-    if isinstance(exc, APIStatusError):
-        return getattr(exc, "status_code", 0) in _RETRYABLE_STATUS
-    # 含 APITimeoutError（其子类）
-    return isinstance(exc, APIConnectionError)
+def _bump(key: str) -> None:
+    """计数必须在锁内：`chat_timed` / `chat_stream` 会被并发请求同时写。
+
+    改造前 token 合计上了锁、hit/miss 没上——统计口径不一致，多线程下
+    命中率会被少算，而命中率是成本结论的分母。
+    """
+    with _LOCK:
+        _STATS[key] += 1
 
 
 def cache_enabled(llm_cfg: dict | None = None) -> bool:
@@ -93,7 +103,9 @@ def _cache_get(key: str) -> str | None:
         with _LOCK:
             conn = _conn()
             try:
-                row = conn.execute("SELECT response FROM responses WHERE key = ?", (key,)).fetchone()
+                row = conn.execute(
+                    "SELECT response FROM responses WHERE key = ?", (key,)
+                ).fetchone()
             finally:
                 conn.close()
     except Exception:  # noqa: BLE001 记数并上抛给调用方可见，不能静默变成一次重复付费
@@ -163,6 +175,47 @@ def cache_stats() -> dict:
         }
 
 
+def cache_inventory() -> dict:
+    """缓存库的静态画像：条数、体积、按模型的分布、最老/最新条目时间。
+
+    为什么要单独看：缓存键带着**完整 prompt**（问题原文 + 检索到的文档正文），
+    命中即返回。它既能把过期答案供得比新答案更快，也是语料内容在磁盘上的一份
+    副本——不报体积和条数，这两件事都没有入口可查。
+    """
+    conn = _conn()
+    try:
+        by_model = conn.execute(
+            "SELECT model, COUNT(*) AS n, MIN(created_at), MAX(created_at)"
+            " FROM responses GROUP BY model ORDER BY n DESC"
+        ).fetchall()
+        total = sum(int(r[1]) for r in by_model)
+    finally:
+        conn.close()
+    size_bytes = _CACHE_PATH.stat().st_size if _CACHE_PATH.exists() else 0
+    return {
+        "path": str(_CACHE_PATH),
+        "entries": total,
+        "size_bytes": size_bytes,
+        "by_model": [
+            {"model": m, "entries": int(n), "oldest": oldest, "newest": newest}
+            for m, n, oldest, newest in by_model
+        ],
+    }
+
+
+def cache_clear() -> dict:
+    """清空响应缓存，返回删掉的条数（re-ingest 之后必须能作废，见 cache_inventory）。"""
+    with _LOCK:
+        conn = _conn()
+        try:
+            n = int(conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0])
+            conn.execute("DELETE FROM responses")
+            conn.commit()
+        finally:
+            conn.close()
+    return {"deleted": n, "path": str(_CACHE_PATH)}
+
+
 def chat(
     llm_cfg: dict,
     user_prompt: str,
@@ -170,6 +223,23 @@ def chat(
     temperature: float | None = None,
 ) -> str:
     return chat_timed(llm_cfg, user_prompt, system_prompt, temperature)[0]
+
+
+def _client(llm_cfg: dict) -> OpenAI:
+    """SDK 客户端。超时可按调用方覆盖，默认沿用合成侧的 180s。
+
+    为什么可配：挂在关键路径上的短调用（查询改写）本来失败就该退化成「不改写」，
+    用合成的超时去打供应商抖动，最坏是 180s × 重试次数 的等待——一个分类调用
+    不该有把整个请求拖死三分钟的能力。
+    """
+    return OpenAI(
+        base_url=llm_cfg["base_url"],
+        api_key=llm_cfg["api_key"],
+        timeout=float(llm_cfg.get("timeout_s") or _DEFAULT_TIMEOUT_S),
+        # 重试只归应用层管：SDK 再叠一层会相乘（4 × (1+SDK) 最多 12 次传输）
+        max_retries=0,
+        default_headers=llm_cfg.get("headers") or None,
+    )
 
 
 def _build_request(
@@ -231,30 +301,30 @@ def chat_timed(
     if use_cache:
         cached = _cache_get(key)
         if cached is not None:
-            _STATS["hit"] += 1
+            _bump("hit")
             return cached, _timing(t0, cached=True, model=llm_cfg["model"])
-    _STATS["miss"] += 1
+    _bump("miss")
 
-    client = OpenAI(
-        base_url=llm_cfg["base_url"],
-        api_key=llm_cfg["api_key"],
-        timeout=180.0,
-        # 重试只归应用层管：SDK 再叠一层会相乘（4 × (1+SDK) 最多 12 次传输）
-        max_retries=0,
-        default_headers=llm_cfg.get("headers") or None,
-    )
+    client = _client(llm_cfg)
     last_exc: Exception | None = None
-    for attempt in range(_RETRIES):
+    attempts = int(llm_cfg.get("max_attempts") or _RETRIES)
+    for attempt in range(attempts):
         t0 = time.perf_counter()  # 每轮重置：ms 只算最后一次成功尝试，不含退避等待
         try:
             resp = client.chat.completions.create(
-                model=llm_cfg["model"], messages=messages, **kwargs
+                model=llm_cfg["model"],
+                # SDK 要的是逐形状的 TypedDict 联合；消息在这里按角色动态拼装，
+                # 用 cast 表达比硬凑字面量更诚实
+                messages=messages,  # type: ignore[arg-type]
+                **kwargs,
             )
         except Exception as exc:
             last_exc = exc
             # 永久错误（401/400/404…）重试没有意义，直接失败并说明原因
-            if not _is_retryable(exc) or attempt == _RETRIES - 1:
-                raise RuntimeError(f"LLM 调用失败（attempt={attempt + 1}）：{exc}") from exc
+            if not is_retryable(exc, (APIConnectionError,)) or attempt == attempts - 1:
+                raise RuntimeError(
+                    f"LLM 调用失败（attempt={attempt + 1}）：{exc}"
+                ) from exc
             time.sleep(_BACKOFF_BASE * (2**attempt))
             continue
         msg = resp.choices[0].message
@@ -262,13 +332,17 @@ def chat_timed(
         usage = getattr(resp, "usage", None)
         if usage:
             details = getattr(usage, "completion_tokens_details", None)
-            prompt_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
-            completion_tok = int(getattr(usage, "completion_tokens", 0) or 0)
-            reasoning_tok = int(getattr(details, "reasoning_tokens", 0) or 0)
+            prompt_tok: int | None = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tok: int | None = int(
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+            reasoning_tok: int | None = int(
+                getattr(details, "reasoning_tokens", 0) or 0
+            )
             with _LOCK:
-                _STATS["prompt_tokens"] += prompt_tok
-                _STATS["completion_tokens"] += completion_tok
-                _STATS["reasoning_tokens"] += reasoning_tok
+                _STATS["prompt_tokens"] += prompt_tok or 0
+                _STATS["completion_tokens"] += completion_tok or 0
+                _STATS["reasoning_tokens"] += reasoning_tok or 0
         else:
             prompt_tok = completion_tok = reasoning_tok = None
         if use_cache and content:
@@ -281,7 +355,7 @@ def chat_timed(
         meta["completion_tokens"] = completion_tok
         meta["reasoning_tokens"] = reasoning_tok
         return content, meta
-    raise RuntimeError(f"LLM 调用失败（已重试 {_RETRIES} 次）：{last_exc}")
+    raise RuntimeError(f"LLM 调用失败（已重试 {attempts} 次）：{last_exc}")
 
 
 def chat_stream(
@@ -310,7 +384,7 @@ def chat_stream(
         if use_cache:
             cached = _cache_get(key)
             if cached is not None:
-                _STATS["hit"] += 1
+                _bump("hit")
                 meta.update(
                     ms=round((time.perf_counter() - t0) * 1000, 1),
                     cached=True,
@@ -320,15 +394,9 @@ def chat_stream(
                 )
                 yield cached
                 return
-        _STATS["miss"] += 1
+        _bump("miss")
 
-        client = OpenAI(
-            base_url=llm_cfg["base_url"],
-            api_key=llm_cfg["api_key"],
-            timeout=180.0,
-            max_retries=0,  # 同 chat_timed：重试只归应用层管，避免与 SDK 相乘
-            default_headers=llm_cfg.get("headers") or None,
-        )
+        client = _client(llm_cfg)
         parts: list[str] = []
         usage_data = {
             "prompt_tokens": None,

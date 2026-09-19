@@ -10,16 +10,22 @@ import pytest
 gradio = pytest.importorskip("gradio")
 
 import doc_rag.api.demo as demo_mod
+from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 
 def test_build_ui_returns_blocks_with_expected_components(monkeypatch):
     """构造 UI 必须全离线：pipeline 用 mock（不建 Qdrant 连接/嵌入器）。"""
     from types import SimpleNamespace
 
-    cfg = {"llm": {}, "rerank": {"enabled": False}, "retrieval": {"max_contexts": 10}}
-    retriever = SimpleNamespace(collection="c")
-    rewriter = SimpleNamespace(rewrite=lambda q: {"rewritten": q, "filters": None, "aggregate": False, "top_n": 8})
-    monkeypatch.setattr(demo_mod, "_pipeline", lambda: (cfg, retriever, rewriter))
+    from doc_rag.orchestrator import Orchestrator
+
+    cfg = {"llm": {}, "retrieval": {"max_contexts": 10}}
+    retriever = SimpleNamespace(retrieve=lambda *a, **k: RetrievalOutcome(chunks=[]))
+    monkeypatch.setattr(
+        demo_mod,
+        "_orchestrator",
+        lambda: Orchestrator(cfg, retriever=retriever, synthesizer=None),
+    )
     demo = demo_mod.build_ui(gradio)
     assert isinstance(demo, gradio.Blocks)
 
