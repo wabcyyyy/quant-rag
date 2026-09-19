@@ -1,9 +1,11 @@
 # 升级为 Agentic RAG：方案（决策优先）
 
-> 状态：**草案**。§0 三条分叉拍板后才展开成分期任务与 PLAN §5.5。
+> 状态：**P0 已拍板（2026-09-20）**。三条分叉的结论、「为什么不是更窄的分解器」、修正后的分期与
+> 验收门槛落在 `PLAN.md` §5.5 —— **凡本文与 §5.5 冲突，以 §5.5 为准**（§10 列出被代码复核推翻的几处）。
+> 本文继续保留的理由：动机的实测出处（§1）、刻意不做的边界（§2）、以及 §9 那份不留情面的自评。
 > 口径分工（延续 A1）：本文只写工程决策、预算与验收；岗位叙事不进仓库文档。
 
-## 0. 三条先要定的分叉
+## 0. 三条先要定的分叉（✅ 已拍板，结论见 PLAN §5.5）
 
 ### F1 agent 循环节不节「跨文档合并陈述」——这条决定其它一切
 
@@ -39,7 +41,7 @@
 
 | # | 缺陷 | 实测出处 |
 |---|---|---|
-| 1 | 聚合题被**清单格数**封顶：8 格下覆盖率 0.7233（上限 0.7917，捕获率 0.89）；生产预算 25 下 0.8325（上限 0.9445，捕获率 **0.87**） | `fix_arm_*.json` / PLAN §5.3。检索不是「找不准」，是单条清单装不下 → 子查询分解是唯一能在不线性放大 prompt 的前提下抬高覆盖率的办法 |
+| 1 | 聚合题被**清单格数**封顶：8 格下覆盖率 0.7233（上限 0.7917，`coverage_vs_ceiling` 0.8906）；生产预算 25 下 0.8325（上限 0.9445，同口径 **0.8723**） | `fix_arm_*.json` / PLAN §5.3。检索不是「找不准」，是单条清单装不下 → 子查询分解是唯一能在不线性放大 prompt 的前提下抬高覆盖率的办法 |
 | 2 | 上下文块集合同配置两遍有 **11%** 的题会变（其中 4/72 换的是文档），而 doc 级检索指标噪声为 0 | PLAN §5.3。答案侧抖动**没有任何检索指标会预警**；「证据够不够」的自判是第一个能看见它的层 |
 | 3 | 表格数值题在黄金集里为 0 条，而「表格完整率 100% vs 52.5%」是头条 | PLAN §5.3：全库 **179 个表格**，固定 512 切下 85 个被切断/跨块；结构感知 100% 完整。**但语料里表格密度的普查没做过**（179 个表格分布在多少篇里、能不能凑出 8 条跨篇数值对比题，未知）——见 §6 P0.5 |
 | 4 | 时效/版本做不了：`doc_date` 覆盖 18.8%、检索无 recency 项、索引里有幽灵块 | README 已知不足 + D1（能报但不能保证清过）。「哪一次会定了什么、后来有没有被推翻」正是立项卖点 |
@@ -58,7 +60,7 @@ Phase 3。步数上限 ≤3，单请求 token 与延迟预算硬封顶（§4）�
 |---|---|---|
 | `search(sub_query, filters, budget)` | `HybridRetriever.retrieve` | 0 |
 | `rerank(query, chunks)` | `Reranker` | 0 |
-| `read_window(doc_id, chunk, span)` | 按邻居块取上下文 | **零前置成本**（本计划初稿说需要补 payload 字段，是错的）：`chunk_id` 本来就是 `doc_id:序号`（`chunker.py:69` 的 `f"{doc_id}:{len(chunks)+1}"`），邻居块 = 推出相邻序号 → `uuid5(chunk_id)` 得 point-id → `client.get(points=[...])` 精确取点。不重新 ingest、不 backfill、不建索引 |
+| `read_window(doc_id, chunk, span)` | 按邻居块取上下文 | **零前置成本**（本计划初稿说需要补 payload 字段，是错的）：`chunk_id` 本来就带序号（`chunker.py:69/85/128` 的 `f"{doc.meta.doc_id}:{len(chunks)+1}"`），邻居块 = 推出相邻序号 → `uuid5(NAMESPACE_URL, chunk_id)`（`indexer.py:269` 就是 point-id 的唯一来源）→ 按 point-id 精确取点。不重新 ingest、不 backfill、不建索引。两条实路约束：`client.get(...)` 在本包**零使用**（现有读路径只有 `query_points`/`scroll`/`count`），且**不得**写 `retriever.collection = ...` —— collection 必须由每次调用的 `kb` 传入，否则重新引入 W1 刚拆掉的串库隐患（`api/main.py:40-42`） |
 | `check_evidence(question, contexts)` | 二元判定「证据够不够答」 | 新 prompt，复用 `eval/judge.py` 那个 endpoint 与拒答审计的解析形状 |
 
 停机条件（写死）：证据足够 / 步数用完 / 预算用完 / 检索为空。
@@ -75,20 +77,36 @@ trace = {
 **每一轮 agent 请求都必须落 trace，judge 重放只读 trace**——沿用 `plan_override` 那条纪律：
 不可复现的中间产物不落盘，就拒绝重放（改写侧已经是这么修的）。
 
+落盘通道现在**不存在**，P1 得自己建：`Result` 没有 `trace` 字段（`latency_ms` 是唯一分段结构，
+键固定为 rewrite/retrieve/rerank/retrieval_total/synthesize/synth_cached/total），`log.py` 的
+`_FIELDS` 是白名单（不在表里的 `extra=` 键**静默丢弃**），`metrics.py` 只有进程内聚合计数
+（`_SAMPLES` 上限 500，无逐请求记录）。
+
 ### 默认只对两类题型开启
 
 检索侧现在 p50 1350ms（改写 821 + 检索 232 + 重排 257），端到端 p50 3.9s / p95 17.1s。
+（⚠ 821+232+257 = **1310** ≠ 1350：分位数不可加，这组数只当数量级用，真数字由 P2 实测。）
 每多一步 ≈ +1 次判定调用（~0.9s）+ 1 次检索/重排（~0.5s）+ 更长 prompt。所以 agent **按题型开关**，
 默认只开 `cross_doc` 与 `time_filter`（它们既是覆盖率封顶的两类，也已有 ≤5s 的聚合 SLO 档）。
 分题型开关是本期唯一的成本控制面，必须是配置而不是代码常量。
+（现状核对：仓库里**没有** type→config 映射 —— 唯一的按题型行为 `llm.reasoning_effort_aggregate`
+键在 `aggregate` 这个布尔上而不是 `item.type` 上；`cross_doc`/`time_filter` 今天只出现在出题与
+报表侧。所以这根开关是要新建的配置形状，不是给现有键加个值。）
 
-## 4. 五入口一致性：扩展 parity 测试，不是绕开它
+## 4. 入口一致性：扩展 parity 测试，不是绕开它
 
-`test_orchestrator_parity` 断言 CLI / `/query` / `/query/stream` / 演示页 / eval 五条入口送进 LLM 的
-prompt 逐字相同、重排调用次数相同、上下文块数相同。agent 必须扩这条：
+**核对后的事实（原文写错了）**：`test_orchestrator_parity` 的 helper 名为 `_drive_all_four`，
+断言的是 `/query` / `/query/stream` / 演示页 / eval **四条**入口送进 LLM 的 prompt 逐字相同、
+重排调用次数相同、上下文块数相同（另有 `kb` 不跨请求残留那条）。**CLI 不在矩阵里** —— 它确实
+走同一个 `Orchestrator`（`cli.py:537`），但没有任何 parity 断言覆盖它。本文初稿说「五条入口」
+是抄了 PLAN §5.4 W1 的同一处笔误（README 的「四条」一直是对的），§5.4 已同步改正。
+agent 必须扩这条：
 
-1. 带 `mode`（single / agent）参数，parity 矩阵在两个 mode 下各跑一遍；
+1. 先补 CLI 成第五条，再带 `mode`（single / agent）参数，parity 矩阵在两个 mode 下各跑一遍；
 2. agent mode 追加断言：**trace 步数、每步 action 集合、LLM 调用次数、token 合计**五入口逐项相等。
+3. 已知障碍：`Orchestrator.answer_stream` 不接受 `plan_override`（只有 `answer` 接受），
+   流式路径无法重放已记录的中间产物 —— 加 agent 之前这条不对称要先收，否则第五条入口的
+   trace 与另四条不同源。
 
 这是 W1 那类漂移（「文档里的头条数字描述的是一条没有交付入口在跑的管线」）目前唯一的防线。
 
@@ -119,7 +137,11 @@ Faithfulness 按 **≥1.9pt** 地板判，检索指标必须过**两臂清单等
    v3 用答案要点命中数（`must_contain` 的逐条命中）与二值「答全/答半」作主指标。
 2. **答案轨要先加等长护栏**：`compare-ragas` 目前对 faithfulness 的上下文块数**完全无感**——
    ragas 产物的 `per_item` 只有 `{id, type, faithfulness}`（实测 `ragas_ds_v2full.json`），
-   而 `compare()` 的 RAGAS 路径 `aux={}`，`_length_warnings` 恒空。agent 臂必然送更多块，
+   而 `compare()` 的 RAGAS 路径 `aux={}`（`compare.py:166`），`_length_warnings` 恒空
+   （`compare.py:255-281` 每条告警都要求两侧 aux 非 None）。注意缺口只在这条轨上：
+   `n_contexts` **已经**逐条落在 eval 的 `items[]`（`runner.py:335`）与 summary 里，检索轨的 aux
+   也已用它 —— 所以修法是两处（`per_item` 带上 `n_contexts` + RAGAS 臂接上既有 aux 通路），不是新建机制。
+   agent 臂必然送更多块，
    而 faithfulness 随上下文变长单调走高 → **这个比较从构造上就偏 agent**，且偏差量级正好在
    judge 自身方差（1.9pt）那一档。先落 `n_contexts` 进 `per_item`，再要求「同块数」对照臂。
 3. Faithfulness 下降不超过 1.9pt，**且第 2 条的等长臂必须先存在**——否则该条不成立。
@@ -128,13 +150,13 @@ Faithfulness 按 **≥1.9pt** 地板判，检索指标必须过**两臂清单等
 **基线口径**：v3 与 agent 臂的数字与现有 72 条基线**不同黄金集版本、不同 prompt 版本、不同 policy**，
 只并列不比较；README 头条仍是单发路径。这就是「新旧基线口径不混用」在本期的落法。
 
-## 6. 分期
+## 6. 分期（✅ 已并入 PLAN §5.5 的分期与验收表，那张表是权威；此处只留动机对照）
 
 | 期 | 内容 | 依赖 | 花费 |
 |---|---|---|---|
-| P0 | F1/F2/F3 拍板，本文转 PLAN §5.5 + 任务表 | — | 0 |
+| P0 | F1/F2/F3 拍板，本文转 PLAN §5.5 + 任务表 | — | 0 · **✅ 2026-09-20** |
 | **P0.5** | **两个前置测量**：① E2 上下文预算消融（本计划的 go/no-go，见 §8）；② 表格密度普查（179 个表格分布在多少篇、能凑出几条跨篇数值题）——决定 §1 第 3 条动机是不是空的 | Qdrant + key | ≈¥2~4 |
-| P1 | `agent.py` 状态机 + trace 落盘 + `read_window`（backfill 补块序号）+ parity 测试扩展 + 全部离线 mock 测试；v3 出题 | 无服务 | 0 |
+| P1 | `agent.py` 状态机 + trace 落盘（含 `_FIELDS` 白名单）+ `read_window`（按 `uuid5(chunk_id)` 精确取邻居块，**不 backfill、不碰 `retriever.collection`**）+ parity 测试扩展（含确定性假 judge）+ 全部离线 mock 测试；v3 出题 | 无服务 | 0 |
 | P2 | 端到端跑通（10 篇示例语料）→ 真实库 24 题小样本 single vs agent，**只看失败分类与步数分布，不报质量结论** | Qdrant + key | ≈¥1~2 |
 | P3 | v3 全量三臂 + 全量 judge + 成本前沿 + Holm + 同臂两遍测方差 | Qdrant + key | ≈¥5~8 |
 | P4 | （可选）放宽规则 3 的多跳合并臂，重做忠实度与拒答口径 | P3 结论 | 另计 |
@@ -187,13 +209,42 @@ B1 两路索引文本对称化、D1 真库幽灵块清理同样会改动 agent �
    「不要 policy 层，只给 `cross_doc`/`time_filter` 做一个确定性的子查询分解器（问题→N 个子查询→并集）」——
    没有循环、没有自判、没有步数决策，也就没有 F1/F2/F3 三条分叉，延迟与成本可预测。
    它拿不到 agent 的叙事，但可能拿到同一份质量收益。**F2 之前必须先回答：为什么不是这个。**
+   ✅ 已答（2026-09-20）：「分解器是 agent 的一个消融臂，反过来不成立」——见 PLAN §5.5。
 6. §4 的 parity 扩展在 mock 下不可实现，除非注入**确定性假 judge**（脚本化判决序列），否则五入口的
    trace 步数根本不可比。改写侧已有「调用即炸」的桩可以先例照抄，原文没写这条。
 7. 成本预算按步数封顶不够：并集后每步 prompt 递增，第 3 步的 `check_evidence` 输入是第 1 步的 2~3 倍，
    而长上下文请求已经实测会撞 60s 超时（本轮 C5 量到，`eval.judge.timeout_s` 因此 60→180）。
    要按 token + 超时双重封顶，并把「每步 contexts 上限」做成配置。
 
-**待你定的（比 F1/F2/F3 更前置）**
+**待你定的（比 F1/F2/F3 更前置）→ 2026-09-20 已定：不先跑 P0.5，先拍板并转 PLAN §5.5**
 
 - 要不要接受先把 **P0.5 的两个测量**跑完再谈 agent。它们花一个晚上、约 ¥2~4，能决定这份计划是继续、
   废弃、还是降级成第 5 条里那个不需要 agent 的子查询分解器。
+- 实际取的是「P1 全离线先行（0 成本、不产出任何对外质量数字），E2 与表格普查作为 P2/P3 的放行闸」，
+  而不是「先测完再谈架构」。理由：P1 的四件产物（子查询分解、trace 落盘、答案轨等长护栏、parity 矩阵）
+  在 E2 的两种结论下都要用，先测不改变 P1 写什么；而上面第 5 条那个「更窄替代方案」与 agent 押的
+  是同一条动机，答它的最好方式是把它做成**消融臂**而不是提前二选一。
+- **代价说清楚**：若 E2 判「多喂块无用」，P1 里 `check_evidence` / `read_window` / 停机决策三块白写，
+  本计划降级为分解器。这是本次拍板明确接受的，所以 §5.5 的门槛是**顺序上**的而非文档上的：
+  E2 出结论前，agent 的任何质量收益不得进 README 或 PLAN §5.3 的口径。
+
+## 10. 转入 PLAN §5.5 时的代码复核（2026-09-20，逐条对着仓库验）
+
+除上面「已改正」的两处，本文另有 6 处与仓库不符，已在 §5.5 按实测写下、正文就地标注
+（PLAN 那边把 #2 与 #3 归并成一条，所以它写「5 处」，指的是同一批问题）：
+
+| # | 本文原写法 | 仓库实测 |
+|---|---|---|
+| 1 | §4「五入口一致性（含 CLI）」 | parity helper 名为 `_drive_all_four` = **四条**；CLI 走同一个 `Orchestrator`（`cli.py:537`）但**无任何 parity 断言**。README 的「四条」一直是对的，PLAN §5.4 W1 与本文是同一处笔误（§5.4 已同步改正） |
+| 2 | §3 引 `chunker.py:69` 的 `f"{doc_id}:{len(chunks)+1}"` | 字面是 `f"{doc.meta.doc_id}:{len(chunks) + 1}"`，且有三处（69/85/128）；point-id = `uuid5(NAMESPACE_URL, chunk_id)`（`indexer.py:269`） |
+| 3 | §3 把 `client.get(points=[...])` 当成现成路 | `client.get` 在整个包里**零使用**（现有读路径只有 `query_points` / `scroll` / `count`）→ 是新建，不是接线；且 `retriever.collection = ...` 那条串库红线不能碰 |
+| 4 | §5 门槛 2「`n_contexts` 要先落进 `per_item`」 | 只对 **RAGAS 轨**成立；eval 的 `items[]`（`runner.py:335`）、summary 与检索轨 aux 早已带它 → 修法是接既有通路，不是造新机制 |
+| 5 | §3「每多一步 ≈ +1.4s」由 821+232+257 相加 | 和是 **1310ms**，同一行标的检索侧总 p50 是 **1350ms** —— 分位数不可加，这组只当数量级用 |
+| 6 | §3 trace 落盘像是既有能力 | `Result` 无 `trace` 字段；`log.py` 的 `_FIELDS` 是白名单，未登记的 `extra=` 键**静默丢弃**；`metrics.py` 只有聚合计数（`_SAMPLES` 上限 500）→ 通道要自建 |
+
+仍然成立、不必改的：§1 表里的全部数字（0.7233 / 0.7917 / 0.8325 / 0.9445、11% 与 4/72、179 与 85、
+18.8%、1121 篇 / 3856 块、0.9451、16/16、≥1.9pt、1130 次调用、端到端 p50 3.9s / p95 17.1s、
+≤5s 聚合 SLO）逐条在 README 或 PLAN 里有出处 —— 本文原先写成的「捕获率 0.89 / 0.87」已还原成仓库
+口径 `coverage_vs_ceiling` **0.8906 / 0.8723**。§9 的第 3 条（F1 混了两件事）、第 4 条（检索级门槛
+不可计算）、第 6 条（mock 下 parity 需要确定性假 judge）、第 7 条（token + 超时双封顶）
+全部并入 §5.5，未被削弱。

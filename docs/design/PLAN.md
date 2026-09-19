@@ -27,7 +27,7 @@
 | 接入 | 飞书/Word 批量导出 PDF + doc(x)，手动迁入 data/raw | 不对接平台 API；增量靠重下 + sha256 去重 |
 | 文件解析 | doc/docx：LibreOffice headless + mammoth；PDF：PyMuPDF | born-digital 语料，轻依赖即可；MinerU 仅在画像发现扫描件时兜底 |
 | 元数据抽取 | LLM 入库时抽取：日期、会议类型、参会人、议题、决议 | 会议记录的检索价值一半在元数据；300 份短文档抽取成本可忽略 |
-| 编排 | 自研 Pipeline（不引编排框架，模块边界清晰） | 解析/分块/评估全是深度定制，框架抽象碍事；未来多轮/agent 场景可局部引入 LlamaIndex/LangGraph |
+| 编排 | 自研 Pipeline（不引编排框架，模块边界清晰） | 解析/分块/评估全是深度定制，框架抽象碍事；agent 一期同样拍板自研薄循环，见 §5.5 F2 |
 | 存储 | Qdrant（Dense + 全文 BM25 双路） | Query API 原生 RRF 融合；单存储，几千份规模无压力 |
 | Embedding | BGE-M3 dense via SiliconFlow API | 中文文档正确默认；API 不吐 sparse（2026-09 查证），hybrid 第二路走 Qdrant full-text BM25 |
 | Reranker | bge-reranker（本地小模型）或 API rerank | 性价比高 |
@@ -1004,10 +1004,13 @@ Faithfulness 差值从此不再有结论资格。
 
 - **W1 编排收敛**：新增 `src/doc_rag/orchestrator.py`，唯一装配点。`Result` 同时携带
   `retrieved`（未截断，检索指标的分母）与 `contexts`（截断后，LLM 所见），两份清单
-  不许合并。`tests/test_orchestrator_parity.py` 断言 CLI / `/query` / `/query/stream` /
-  演示页 / eval 五条入口送进 LLM 的 prompt 逐字相同、重排调用次数相同、上下文块数相同；
+  不许合并。`tests/test_orchestrator_parity.py` 断言 `/query` / `/query/stream` / 演示页 /
+  eval 四条入口送进 LLM 的 prompt 逐字相同、重排调用次数相同、上下文块数相同；
   并断言 `kb` 不再残留到下一个请求（改造前端点用 `retriever.collection = body.kb`
   改的是 `lru_cache` 单例，并发会串库）。
+  > ⚠️ 本条原文把 CLI 也算成第五条入口，与 README「四条路径共用它」自相矛盾。2026-09-20 核对
+  > helper `_drive_all_four` 后改正：CLI 确实走同一个 `Orchestrator`（`cli.py:537`），但
+  > **没有任何 parity 断言覆盖它**。把矩阵补成五条是 §5.5 的 P1 任务之一。
 - **W2 配置诚实化**：删掉 5 个没人读的键（`parent_expand`、`rrf_k`、`rerank_top_n`、
   `embedding.sparse`、`metadata_extraction.fields`）。新增
   `tests/test_config_keys_are_wired.py`：解析 default.yaml 的叶子键，逐个断言 src 里
@@ -1089,6 +1092,93 @@ CI 四道闸门：ruff check / ruff format --check / mypy（渐进式基线，�
   注意判分集合只排除 `type==no_answer`，`time_filter`/`fact` 上的正确拒答仍进集合并被扣。
 
 不绕过：改 RAGAS 的拆句/判定提示词等于换度量身份，宁可把结论限制在配对差 + 大样本上。
+
+### 5.5 Agentic RAG 升级（2026-09-20 拍板 · 方案与自评记录在 `docs/design/AGENTIC_RAG.md`）
+
+一句话：在 `orchestrator` 之上加一层 **policy**（有界多步检索 + 证据自判），不引编排框架、
+不做多轮会话、不动 §5.3 已经确立的单发基线口径。
+
+下文「草案」= `docs/design/AGENTIC_RAG.md`，其 §N 编号是该文件内的编号。
+**刻意不做**（草案 §2 的边界，一并搬过来）：不接外部工具与互联网、不做自由 tool 选择的
+autonomous agent、不做多租户/权限、GraphRAG 全量仍留 Phase 3；**步数上限 ≤3**，单请求的
+token 与延迟预算硬封顶。
+
+**三条分叉的结论**
+
+| 分叉 | 拍板 | 已接受的代价 | 重开条件 |
+|---|---|---|---|
+| F1 合成规则 3（禁止把多篇信息合并成任何单篇都不存在的陈述） | P1~P3 **一字不放宽**，「放宽」做成 P4 独立臂 | 第一版看起来「不够 agentic」，更像会自己多查几次的检索器，答案仍是逐篇事实的枚举 | 只由 P3 结论推动 |
+| F2 循环自研 vs LangGraph / LlamaIndex workflows | **自研薄循环**（有界步数 + 显式状态 + trace 落盘），≈600 行 | 停机/重试/超时自己写；框架在 policy 与预算这两处本来就帮不上忙 | — |
+| F3 多轮会话状态 | **本期不做**，agent 限定在「单条问题内的多步」 | 产品上少一个「追问」；换来不动服务契约（服务端状态要连鉴权、限流、缓存键、「同一句第二次问算不算同一测量」一起重做） | 独立一期 |
+
+F1 的代价比草案写的**高一档**：草案把「放宽规则 3」和「agent 送了更多块进 LLM」混成一件事。
+即使规则 3 一字不动，只要 agent 臂的 `contexts` 比单发臂多，faithfulness 就天然偏高。
+**保住可比性的不是「不放宽」，而是答案轨的等长护栏** —— 而它目前不存在（见下面 P1）。
+
+**F2 的前置问题：为什么不是「确定性子查询分解器」**（草案 §9 第 5 条自己提出的更窄方案，不回答就不能定架构）
+
+分解器与 agent 押的是同一条动机（§5.3：覆盖率被清单格数封顶 —— 8 格 0.7233 / 上限 0.7917，
+生产预算 25 下 0.8325 / 上限 0.9445，而同口径 `coverage_vs_ceiling` 0.8906→0.8723，即变长
+≠ 变准），成本与延迟确实更可预测，也**同样**需要 trace 与等长护栏。选 agent 的理由只有一条：
+**分解器是 agent 的一个消融臂，反过来不成立。** 分解器 = 固定一步扇出、无证据自判、无停机决策；
+agent 减去 `check_evidence` 再减去 `read_window` 就退化成它。所以做完 agent 能一次回答「收益
+来自哪一步」，先做分解器则永远回答不了草案 §1 缺陷表的第 2 条（11% 的上下文集合抖动没有任何检索指标会
+预警，证据自判是唯一能看见它的那一层）与第 5 条（§3 设计原则 2 承诺的「父块/窗口进 LLM」**从未实现**：
+W2 删掉的 `parent_expand` 是个没人读的键，代码里没有任何邻居块扩展）。**代价**：若 E2 否证「多喂块有用」，
+P1 里 `check_evidence` / `read_window` / 停机三块白写；子查询分解、trace 落盘、等长护栏、
+parity 扩展这四件是两条路共用的，不会白。
+
+**门槛与推进顺序（本次拍板明确接受的风险）**：E2（上下文预算消融 6→15/25 块）**没有跑**，
+它仍是草案 §1 第 1 条动机（覆盖率被清单格数封顶）的 go/no-go。本期允许的推进方式是：P1 全离线先行（0 成本、不产生任何
+对外质量数字），**E2 出结论前不启动 P2/P3，agent 的任何质量收益不得进 README 或 §5.3 的口径**。
+表格密度普查同属 P0.5，它决定草案 §1 第 3 条（全库 179 个表格、固定 512 切下 85 个被切断或跨块、
+而黄金集里表格数值题 0 条）到底能不能凑出 ≥8 条跨篇数值对比题 —— 凑不出来那条动机就是空的。
+
+**草案转入本节时的代码复核改掉了 5 处**（草案文字与仓库不符，一律以下面这版为准）：
+
+1. 草案 §4 的「五入口一致性」**不成立**：parity helper 名为 `_drive_all_four`，覆盖 `/query`、
+   `/query/stream`、演示页、eval **四条**；CLI 走同一个 `Orchestrator` 但无断言（§5.4 W1 已同步改正）。
+2. 答案轨护栏的缺口比草案说的小、但位置更精确：`n_contexts` **已经在** eval 的 `items[]`
+   （`eval/runner.py:335`）与 summary 里，缺的只有 **RAGAS 轨的 `per_item`**（`runner.py:889-900`
+   只写 `{id, type, faithfulness}`），且 `compare.py:166` 给 RAGAS 臂的是 `aux={}` →
+   `_length_warnings` 在该轨恒空（`compare.py:255-281` 每条告警都要求两侧 aux 非 None）。
+   「faithfulness 对上下文块数完全无感」这句为真；修法是两处：`n_contexts` 落进 `per_item` + 走已有的 aux 通路。
+3. `read_window` 的前提为真、路径全新：`chunk_id = f"{doc.meta.doc_id}:{len(chunks)+1}"`
+   （`chunker.py:69/85/128`）确实带序号，point-id = `uuid5(NAMESPACE_URL, chunk_id)`
+   （`indexer.py:269`）→ 邻居块可按 point-id 精确取，**零前置成本、不重新 ingest、不 backfill**。
+   但 `client.get(...)` 在整个包里**零使用**（现有读路径只有 `query_points` / `scroll` / `count`），
+   而且**绝不能**按草案写 `retriever.collection = ...` —— 那正是 W1 刚拆掉的串库隐患
+   （`api/main.py:40-42`），collection 必须由每次调用的 `kb` 传入。
+4. 草案「每多一步 ≈ +1.4s」是把分阶段 p50 相加（821+232+257 = **1310ms**），而同一行标的检索侧
+   总 p50 是 **1350ms** —— 中位数不可加。步数预算只当数量级用，真数字由 P2 实测。
+5. trace 现在落不了盘：`log.py:19-31` 的 `_FIELDS` 是白名单，不在表里的 `extra=` 键**静默丢弃**；
+   `metrics.py` 只有进程内聚合计数（`_SAMPLES` 上限 500），无逐请求记录。逐请求 trace 必须自己选
+   通道（随结果文件落盘，或独立 JSONL），并给 `JsonFormatter` 加键。
+
+**必须做成配置、不能是代码常量的三件**：分题型开关（默认只开 `cross_doc` / `time_filter`）、
+每步 `contexts` 上限、每步自己的 `timeout_s` / `max_attempts`（沿用 W3 教训：可退化的步骤不该有
+12 分钟的等待能力）。现状是仓库里**没有** type→config 映射，唯一的按题型行为
+`llm.reasoning_effort_aggregate` 键在 `aggregate` 这个布尔上而非 `item.type`。
+预算按 **token + 超时双封顶**，步数只是第三道（第 3 步 `check_evidence` 的输入是第 1 步的 2~3 倍，
+长上下文已实测会撞超时 —— `eval.judge.timeout_s` 60→180 就是这么来的）。
+
+**分期与验收（P0 = 本节，已完成）**
+
+编号先说清：这里的 P0~P4 是 **agent 期号**，与 §5.4 生产化那批 `P1–P4`、§7 路线图那批 `Phase 0~3`
+是三套编号，互不相指。
+
+| 期 | 内容 | 依赖 | 花费 | 不达标就不进下一期 |
+|---|---|---|---|---|
+| ~~P0~~ | F1/F2/F3 拍板 + 本节 | — | 0 | ✅ 2026-09-20 |
+| P0.5 | E2 上下文预算消融 · 表格密度普查 | Qdrant + key | ≈¥2~4 | E2 判「多喂块 → 答案要点命中」升不升；普查给出 179 个表格的分布与可出题数 |
+| P1 | `agent.py` 状态机 + trace 落盘（含 `_FIELDS`）+ `read_window`（按 point-id 取，不碰 collection）+ `check_evidence` prompt + 答案轨等长护栏（上面第 2 条的两处）+ parity 矩阵补 CLI 与 `mode` 两维 + v3 multi-hop 黄金集 ~24 条（零 LLM 构造优先，`gen-gold --programmatic-only`） | 无服务 | 0 | 全离线门禁绿；**parity 在 mock 下可跑的前提是注入确定性假 judge**（脚本化判决序列；先例照抄 `tests/test_rewrite_llm.py` 的 `_forbidden`「调用即炸」桩） |
+| P2 | 10 篇示例语料端到端 → 真实库 24 题 small sample，single vs agent | Qdrant + key，且 E2 已放行 | ≈¥1~2 | 只看**失败分类与步数分布**，不报质量结论；两臂各跑一次 `audit-refusals`（风险 1：agent 会把「检索不到」伪装成「文档没记载」，而 `refusal_acc` 只查措辞看不见） |
+| P3 | v3 三臂（single-shot / agent-3step / agent−`read_window`−`check_evidence`）+ 全量 judge + 成本-质量前沿 + 同臂两遍方差 | Qdrant + key | ≈¥5~8 | 主指标是**答案级**（`must_contain` 逐条命中 + 二值「答全/答半」）；`coverage_vs_ceiling` 在多步并集上**不可计算**（每步各有上限，并集 ceiling 取决于去重规则）→ 不得当门槛；Faithfulness 降幅 ≤ **1.9pt** 地板且等长臂必须先存在；聚合题 p95 ≤ 现有 ≤5s SLO 的两倍 |
+| P4 | （可选）放宽规则 3 的多跳合并臂 | P3 结论 | 另计 | 换的是**度量身份**：Faithfulness 基线作废，`audit-refusals`「上下文里有没有逐字记载」的判据会把合并陈述一律判成编造，那条 prompt 必须重写 |
+
+**基线口径（延续「新旧不混用」）**：v3 与 agent 臂同现有 72 条**不同黄金集版本、不同 prompt 版本、
+不同 policy** → 只并列不比较，README 头条仍是单发路径。**每一轮 agent 请求必须落 trace，judge 重放
+只读 trace，缺记录值就拒绝重放** —— 与改写侧 `plan_override` 同一条纪律（§5.4 W3）。
 
 ## 6. 交付物与复现命令
 

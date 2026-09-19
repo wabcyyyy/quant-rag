@@ -20,7 +20,7 @@
 ## 设计
 
 - [design/PLAN.md](design/PLAN.md)：唯一事实源（证据库）。设计取舍、消融、被推翻的结论、复现命令。**不是操作手册**——系统「现在怎么跑」看 architecture/system-design.md
-- [design/AGENTIC_RAG.md](design/AGENTIC_RAG.md)：升级为 agentic RAG 的方案（草案）。§0 三条分叉待拍板，未开工
+- [design/AGENTIC_RAG.md](design/AGENTIC_RAG.md)：升级为 agentic RAG 的方案 + 自评记录。**P0 已拍板（2026-09-20）**：三条分叉的结论、修正后的分期与验收门槛在 `PLAN.md` §5.5（权威）；本文与 §5.5 冲突处以 §5.5 为准（§10 列了本文被代码复核推翻的 6 处）。代码尚未开工
 
 ## 指南
 
