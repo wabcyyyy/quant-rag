@@ -42,7 +42,9 @@
 
 - **自研薄编排，不引编排框架**：重型轮子全用库（Qdrant/BGE/PyMuPDF/RAGAS），定制层自己写。
   编排只有 `src/doc_rag/orchestrator.py` 一处：CLI / FastAPI 两个端点 / Gradio 演示页 / eval
-  四条路径共用它，`tests/test_orchestrator_parity.py` 断言四者送进 LLM 的 prompt 逐字相同。
+  五条入口共用它，`tests/test_orchestrator_parity.py` 把这五条入口（含 CLI 的默认与
+  `--stream` 两种形态）各驱动一次，断言送进 LLM 的 prompt 逐字相同、重排调用次数相同、
+  上下文块数相同。
   此前这条链在 6 处内联重复并已经漂移——服务端点漏掉重排与上下文截断，头条数字描述的是
   一条没有交付入口在跑的管线。
 - **默认 Hybrid**：纯 Dense 搞不定文号、专名、精确条款（消融 #1）。RRF 由 Qdrant 服务端实现，

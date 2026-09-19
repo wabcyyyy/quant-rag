@@ -95,9 +95,10 @@ trace = {
 
 ## 4. 入口一致性：扩展 parity 测试，不是绕开它
 
-**核对后的事实（原文写错了）**：`test_orchestrator_parity` 的 helper 名为 `_drive_all_four`，
-断言的是 `/query` / `/query/stream` / 演示页 / eval **四条**入口送进 LLM 的 prompt 逐字相同、
-重排调用次数相同、上下文块数相同（另有 `kb` 不跨请求残留那条）。**CLI 不在矩阵里** —— 它确实
+**核对后的事实（原文写错了）**：`test_orchestrator_parity` 的 helper 原名为 `_drive_all_four`
+（现已改名 `_drive_all_entries`），改正前断言的是 `/query` / `/query/stream` / 演示页 / eval
+**四条**入口送进 LLM 的 prompt 逐字相同、
+重排调用次数相同、上下文块数相同（另有 `kb` 不跨请求残留那条）。**当时 CLI 不在矩阵里** —— 它确实
 走同一个 `Orchestrator`（`cli.py:537`），但没有任何 parity 断言覆盖它。本文初稿说「五条入口」
 是抄了 PLAN §5.4 W1 的同一处笔误（README 的「四条」一直是对的），§5.4 已同步改正。
 agent 必须扩这条：
@@ -238,7 +239,7 @@ B1 两路索引文本对称化、D1 真库幽灵块清理同样会改动 agent �
 
 | # | 本文原写法 | 仓库实测 |
 |---|---|---|
-| 1 | §4「五入口一致性（含 CLI）」 | parity helper 名为 `_drive_all_four` = **四条**；CLI 走同一个 `Orchestrator`（`cli.py:537`）但**无任何 parity 断言**。README 的「四条」一直是对的，PLAN §5.4 W1 与本文是同一处笔误（§5.4 已同步改正） |
+| 1 | §4「五入口一致性（含 CLI）」 | parity helper 原名 `_drive_all_four` = **四条**；CLI 走同一个 `Orchestrator`（`cli.py:537`）但**无任何 parity 断言**。README 的「四条」一直是对的，PLAN §5.4 W1 与本文是同一处笔误（§5.4 已同步改正；CLI 已于 P1 补进矩阵） |
 | 2 | §3 引 `chunker.py:69` 的 `f"{doc_id}:{len(chunks)+1}"` | 字面是 `f"{doc.meta.doc_id}:{len(chunks) + 1}"`，且有三处（69/85/128）；point-id = `uuid5(NAMESPACE_URL, chunk_id)`（`indexer.py:269`） |
 | 3 | §3 把 `client.get(points=[...])` 当成现成路 | `client.get` 在整个包里**零使用**（现有读路径只有 `query_points` / `scroll` / `count`）→ 是新建，不是接线；且 `retriever.collection = ...` 那条串库红线不能碰 |
 | 4 | §5 门槛 2「`n_contexts` 要先落进 `per_item`」 | 只对 **RAGAS 轨**成立；eval 的 `items[]`（`runner.py:335`）、summary 与检索轨 aux 早已带它 → 修法是接既有通路，不是造新机制 |

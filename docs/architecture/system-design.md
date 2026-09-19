@@ -46,6 +46,10 @@
 
 装配点**只有一个**：`src/doc_rag/orchestrator.py` 的 `Orchestrator`。禁止在入口层再手拼 rewrite→retrieve→rerank→synthesize。
 
+上面的「四条」是按**入口种类**数的；parity 护栏按**调用点**数：`/query`、`/query/stream`、演示页、
+eval 单条、`doc-rag query`（默认与 `--stream` 两种形态）共**六次**合成调用，断言逐字同 prompt、
+重排次数、`max_contexts` 截断三项对六次同样成立（`tests/test_orchestrator_parity.py`）。
+
 ---
 
 ## 2. 在线主流程（每题）

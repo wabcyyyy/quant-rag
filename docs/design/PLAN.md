@@ -1136,7 +1136,7 @@ parity 扩展这四件是两条路共用的，不会白。
 
 **草案转入本节时的代码复核改掉了 5 处**（草案文字与仓库不符，一律以下面这版为准）：
 
-1. 草案 §4 的「五入口一致性」**不成立**：parity helper 名为 `_drive_all_four`，覆盖 `/query`、
+1. 草案 §4 的「五入口一致性」**不成立**：parity helper 原名为 `_drive_all_four`，改正前覆盖 `/query`、
    `/query/stream`、演示页、eval **四条**；CLI 走同一个 `Orchestrator` 但无断言（§5.4 W1 已同步改正，
    断言本身已随 P1 补齐 —— 见本节末「P1 进度」）。
 2. 答案轨护栏的缺口比草案说的小、但位置更精确：`n_contexts` **已经在** eval 的 `items[]`
