@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -18,7 +19,7 @@ from itertools import pairwise
 from pathlib import Path
 
 from ..generate import llm
-from .schema import GoldItem
+from .schema import GoldItem, KeyPoint, kp_normalize
 
 _PER_DOC_TYPES = ["fact", "decision", "open_discussion", "term"]
 
@@ -205,13 +206,132 @@ def _docs_containing(docs: list[dict], needle: str) -> list[str]:
     return sorted(d["doc_id"] for d in docs if n in _norm(d["text"]))
 
 
-def _cross_doc_items(docs: list[dict], llm_cfg: dict) -> list[GoldItem]:
+# ── 聚合题的逐篇要点（答案轨判据） ───────────────────────────────────────
+#
+# 为什么要有：cross_doc / time_filter 的 `must_contain` 只有 1 个词（就是那个人名），
+# 而答案集 10~56 篇。答案是「提到过这个词」就算答对，所以「上下文 6 块答出 2 篇」
+# 与「25 块答出 18 篇」在答案轨上同分——上下文预算消融拿不到读数。
+# 一条要点绑一篇文档，命中它才等于把那一篇答出来。
+#
+# 三条判据，缺一条这道要点就没资格当判据：
+# 1. **逐字来自该篇**（复用 `_gen_for_doc` 那条 grounding 纪律：不逐字就无法核对）；
+# 2. **全库唯一**——只在这一篇出现。否则答案提一次同时命中多篇，覆盖率式的重复计分；
+#    这条与 census 那次教训同源：日期行/序号列长得极像「可对齐的同一标签」，不剔就把
+#    噪声读成信号；
+# 3. **含本题实体**（人名），保证这篇的要点说的是这件事，不是任意一句正文。
+#
+# 分母用「等距抽 min(N, 8) 篇」而不是全量：56 篇的题要求逐篇答全，物理上写不进一个
+# 几百字的答案，题间也没法比。抽 8 篇让所有聚合题共用同一个 K。
+_K_MAX_DOCS = 8
+_K_MIN_CHARS, _K_MAX_CHARS = 8, 25
+_K_SEG_SPLIT = re.compile(r"[\n，。；：、,;:!！?？)）(（|\"“”]")
+# 每个候选文档最多试几句：长文档一句一句扫全库会白付几千次子串查找
+_K_CANDIDATE_LIMIT = 12
+_KP_NAME = re.compile(r"@[\u4e00-\u9fa5]{2,4}")
+
+
+def _kp_says_something(phrase: str) -> bool:
+    """短语得在名字之外真的说件事。
+
+    实测踩过的坑：`__@陈凡@康少云@黄日航@张果@田锃__` 这种发言人清单**全库唯一**，
+    通得过唯一性判据，却什么都不主张——模型照抄它就是「答对」，认真转述反而不命中。
+    唯一 ≠ 有信息量，这条是补那半边。
+
+    判据只有一条：把 `@姓名` 全部摘掉后还剩 ≥6 个字才算「说了件事」。原先这里还有一
+    条「@ 超过 3 个就拒」，突变验证时发现它**永远轮不到说话**（清单行的名字摘掉后
+    本来就只剩 `__`），而它还会误杀「@甲@乙@丙三人负责机房巡检」这种真主张——删了。
+    """
+    return len(_KP_NAME.sub("", phrase).strip()) >= 6
+
+
+def _kp_candidates(text: str, entity: str) -> list[str]:
+    """该篇里所有「含实体、长度合规、且真的主张了件事」的候选短语。"""
+    want = _norm(entity)
+    out: list[str] = []
+    for seg in _K_SEG_SPLIT.split(_clean_text(text)):
+        phrase = _norm(seg)
+        if (
+            _K_MIN_CHARS <= len(phrase) <= _K_MAX_CHARS
+            and want in phrase
+            and _kp_says_something(phrase)
+            and phrase not in out
+        ):
+            out.append(phrase)
+    return out
+
+
+class _KeyPointIndex:
+    """全库归一化正文的只读索引：要点唯一性的判定依据，一次构建、多题复用。"""
+
+    def __init__(self, docs: list[dict]) -> None:
+        self._texts = {kp_normalize(d["text"]) for d in docs}
+        # 同一篇可能被重复加载（同名 doc_id）；按篇数算唯一性时要按去重后的文本走
+        self._n_docs = len(self._texts)
+
+    def is_unique(self, phrase: str) -> bool:
+        """全库只有 0 或 1 篇含这个短语。
+
+        0 篇不可能（短语出自某篇），但判 `<= 1` 而不是 `== 1`：调用方给的短语若来自
+        索引之外的文本（测试里注入），不该被判成「不唯一」而静默丢掉。
+        """
+        n = kp_normalize(phrase)
+        return sum(1 for t in self._texts if n in t) <= 1
+
+    @property
+    def size(self) -> int:
+        return self._n_docs
+
+
+def _pick_unique_phrase(cands: list[str], index: _KeyPointIndex) -> str | None:
+    """按「长的优先 → sha256 升序」取第一个全库唯一的候选句。
+
+    排序必须是确定性的：同一份语料重跑要逐字得到同一批要点，否则黄金集本身不可复现。
+    """
+    ordered = sorted(
+        cands, key=lambda p: (-len(p), hashlib.sha256(p.encode()).hexdigest())
+    )
+    for phrase in ordered[:_K_CANDIDATE_LIMIT]:
+        if index.is_unique(phrase):
+            return phrase
+    return None
+
+
+def _equal_pick(ids: list[str], k: int) -> list[str]:
+    """已排序 doc_id 里等距取 k 篇（与 judge 抽样「均匀覆盖」同一个理由）。"""
+    if not ids or k >= len(ids):
+        return list(ids)
+    step = len(ids) / k
+    return [ids[int(i * step)] for i in range(k)]
+
+
+def _key_points(
+    docs: list[dict], src_ids: list[str], entity: str, index: _KeyPointIndex
+) -> list[KeyPoint]:
+    """给一道聚合题造逐篇要点；凑不出任何唯一句时返回空列表（不硬造判据）。"""
+    chosen = _equal_pick(sorted(src_ids), _K_MAX_DOCS)
+    text_by = {d["doc_id"]: d["text"] for d in docs}
+    out: list[KeyPoint] = []
+    for doc_id in chosen:
+        text = text_by.get(doc_id)
+        if not text:
+            continue
+        phrase = _pick_unique_phrase(_kp_candidates(text, entity), index)
+        if phrase:
+            out.append(KeyPoint(doc_id=doc_id, phrase=phrase))
+    return out
+
+
+def _cross_doc_items(
+    docs: list[dict], llm_cfg: dict, index: _KeyPointIndex | None = None
+) -> list[GoldItem]:
     """跨文档聚合题：人名有效（@ 验证）+ 全库 5~60 篇含名（有区分度且答案集完整）。
 
     v1 教训：来源集合若只取 @ 提及的文档会严重漏计（黄日航 @ 提及 8 篇，
     实际 205 篇含名），导致把正确检索判为未命中。聚合题的来源 = 全部含名文档。
     """
     names = _person_names(docs)
+    if index is None:
+        index = _KeyPointIndex(docs)
     scored: list[tuple[str, list[str]]] = []
     for name in names:
         src = _docs_containing(docs, name)
@@ -228,6 +348,7 @@ def _cross_doc_items(docs: list[dict], llm_cfg: dict) -> list[GoldItem]:
                 expected_answer=f"散见于 {len(src)} 篇文档，围绕「{name}」有多次记录（聚合题，按检索命中评分）",
                 must_contain=[name],
                 source_doc_ids=src,
+                key_points=_key_points(docs, src, name, index),
                 refusable=False,
                 source_title="(跨文档)",
             )
@@ -330,13 +451,17 @@ def _gen_for_doc(doc: dict, qtype: str, llm_cfg: dict) -> list[GoldItem]:
     return items
 
 
-def _time_items(docs: list[dict]) -> list[GoldItem]:
+def _time_items(
+    docs: list[dict], index: _KeyPointIndex | None = None
+) -> list[GoldItem]:
     """时间限定题：年份 × 该年内 2~40 篇含名的人名（答案集完整、范围聚焦）。
 
     v2 放宽（黄金集补题）：答案集上限 15→40、每年 ≤4→≤6 条、总量 8→12——
     v1 只有 5 条（n<20 时 p95 基本等于 max，延迟与覆盖率数字置信度弱）。
     全部为程序化构造，零 LLM 成本。
     """
+    if index is None:
+        index = _KeyPointIndex(docs)
     by_year: dict[str, list[dict]] = {}
     for d in docs:
         m = re.search(r"20\d{2}", d["title"])
@@ -363,6 +488,7 @@ def _time_items(docs: list[dict]) -> list[GoldItem]:
                     expected_answer=f"{year}年语料中「{name}」相关内容（时间限定题，按检索命中评分）",
                     must_contain=[name],
                     source_doc_ids=src,
+                    key_points=_key_points(docs, src, name, index),
                     refusable=False,
                     source_title=f"({year})",
                 )
@@ -528,6 +654,7 @@ def generate(
     """
     docs = _load_docs(parsed_dir)
     sampled = _sample(docs, per_doc, seed)
+    kp_index = _KeyPointIndex(docs)
 
     kept: list[GoldItem] = []
     programmatic_decisions: list[GoldItem] = []
@@ -551,8 +678,8 @@ def generate(
             qtype = _PER_DOC_TYPES[i % len(_PER_DOC_TYPES)]
             items.extend(_gen_for_doc(doc, qtype, llm_cfg))
 
-    items.extend(_cross_doc_items(docs, llm_cfg))
-    items.extend(_time_items(docs))
+    items.extend(_cross_doc_items(docs, llm_cfg, index=kp_index))
+    items.extend(_time_items(docs, index=kp_index))
     items.extend(_no_answer_items(docs))
 
     # 去重 + 编号
@@ -567,12 +694,27 @@ def generate(
         final.append(item)
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
+    agg = [i for i in final if i.type in ("cross_doc", "time_filter")]
+    with_points = [i for i in agg if i.key_points]
     meta_out = {
         "seed": seed,
         "corpus_docs": len(docs),
         "sampled_docs": len(sampled),
         "count": len(final),
         "type_distribution": dict(Counter(i.type for i in final)),
+        # 判据密度必须随文件自证：聚合题原先是「1 个关键词 vs 10~56 篇答案集」，
+        # 光报题型分布看不出来。K=0 的条目要能被数出来，不然新指标的分母是猜的。
+        "aggregation_key_points": {
+            "n_aggregate_items": len(agg),
+            "n_with_points": len(with_points),
+            "mean_k": round(
+                sum(len(i.key_points) for i in with_points) / len(with_points), 2
+            )
+            if with_points
+            else None,
+            "max_k": _K_MAX_DOCS,
+            "uniqueness_scope_docs": kp_index.size,
+        },
     }
     if programmatic_only:
         # v2 口径自证：time_filter 答案集上限 15→40、每年 ≤6 条；decision 增加决议区

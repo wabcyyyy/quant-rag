@@ -37,7 +37,9 @@ from pathlib import Path
 
 SUPPORTED_RAGAS = ("faithfulness", "answer_relevancy")
 
-#: 检索轨可选的逐条指标（键名与 `summary` 里的汇总键一致）。
+#: 目标轨（逐条分数从 `items[]` 派生、判分不依赖 LLM）可选的指标。
+#: 里面混着两个层级，所以不叫「检索轨」：前七个是**检索级**，后两个是**答案级**
+#: （它们读的是答案文本，只是和检索级一样躺在 `items[]` 里、走同一套配对判读）。
 RETRIEVAL_METRICS = (
     "hit_at_5",
     "hit_at_8",
@@ -46,9 +48,18 @@ RETRIEVAL_METRICS = (
     "ndcg_at_8",
     "mean_doc_coverage",
     "coverage_vs_ceiling",
+    "answered_ok",
+    "keypoint_hit_ratio",
 )
 
+#: 答案级的那两个：判据是字符串匹配，但读数随答案变，所以块数/清单长度是**实验变量**
+#: 而不是伪影（见 `_length_warnings` 的 answer 分支）。
+ANSWER_METRICS = ("answered_ok", "keypoint_hit_ratio")
+_KEYPOINT_METRIC = "keypoint_hit_ratio"
+
 #: `compare-retrieval` 默认一次跑齐的指标族（`hit_within_budget` 要看清单末再单独点）。
+#: 两个答案级指标也在族内：它们只在有判据的条目上有值（聚合题 17 条 / 可答题 64 条），
+#: n 更小，但与其余指标同属一次运行、一起进 Holm 家族，所以只会更保守。
 RETRIEVAL_SWEEP = (
     "hit_at_5",
     "hit_at_8",
@@ -56,13 +67,36 @@ RETRIEVAL_SWEEP = (
     "ndcg_at_8",
     "mean_doc_coverage",
     "coverage_vs_ceiling",
+    "answered_ok",
+    _KEYPOINT_METRIC,
 )
 
-_NOISE_LABEL = {True: "检索重跑噪声地板", False: "judge 噪声地板"}
+_NOISE_LABEL = {
+    "retrieval": "检索重跑噪声地板",
+    # 答案级：判据本身是字符串匹配（同一答案必得同一分），极差全部来自**答案生成**
+    # 的 run-to-run 差异。说成「judge 噪声地板」会把一个不经过 judge 的指标挂上
+    # judge 的地板，读的人会以为 1.9pt 那条下限适用于它——不适用。
+    "answer": "答案重跑极差（判据确定性，差异只来自生成）",
+    "ragas": "judge 噪声地板",
+}
 
 
 def _retrieval_value(metric: str, row: dict) -> float | None:
     """从一条检索结果算出该指标的逐条值；无 gold 的条目返回 None（不进分母）。"""
+    if metric == _KEYPOINT_METRIC:
+        # 答案级判据：分母是「有 key_points 的条目」，与有没有 gold 文档无关。
+        # 旧结果文件没这个键 → None，配对时自然落进「两臂都无值」的第三类，
+        # 与 P1-e 那条护栏同一个处置（不假装等长，也不凭空报错）。
+        value = row.get("keypoint_hit")
+        return None if value is None else float(value)
+    if metric == "answered_ok":
+        # 答案级：runner 算好的「must_contain 是否逐条齐」（全有或全无）。
+        # **它不叫 contains_acc，因为分母不同**：summary 的 `contains_acc` 只在
+        # `scorable`（非拒答且有判据）上算 = 64 条；这里能拿到的最大集合是所有
+        # `answered_ok` 非 None 的条目（含拒答题，= 72 条）。差值不受影响（两臂
+        # 同一分母），但均值不许借那个名字。
+        value = row.get("answered_ok")
+        return None if value is None else (1.0 if value else 0.0)
     if row.get("doc_coverage") is None:
         return None
     rank = row.get("first_hit_rank")
@@ -101,15 +135,18 @@ def _load_retrieval(p: Path, data: dict, metric: str) -> dict:
             continue
         items[rid] = value
         # 清单长度与覆盖率上限是"这个差值能不能当质量差读"的判据，必须逐条带着走。
+        # `k` 是答案级指标的分母（这道题有几个要点）：两臂 K 不同就意味着分母变了，
+        # 和「清单不等长」在检索轨上的地位完全一样。
         aux[rid] = {
             "list_len": row.get("n_retrieved"),
             "ctx_len": row.get("n_contexts"),
             "ceiling": row.get("doc_coverage_ceiling"),
+            "k": row.get("n_key_points"),
         }
     return {
         "path": p,
         "metric": metric,
-        "track": "retrieval",
+        "track": "answer" if metric in ANSWER_METRICS else "retrieval",
         "items": items,
         "types": types,
         "aux": aux,
@@ -269,6 +306,18 @@ def _length_warnings(
 ) -> list[str]:
     """两臂清单长度 / 上下文块数 / 覆盖率上限不等 → 差值不能整体当质量差读。"""
     warns: list[str] = []
+    if track == "answer":
+        # 答案级指标只看答案文本：块数不等是 E2 的**实验变量**而不是伪影，清单长度与
+        # 覆盖率上限也只影响检索级指标的分母。这个轨上唯一会破坏可比性的是分母 K 变了
+        # （同一份黄金集才谈得上配对），所以只报那一条。
+        ka = _aux_mean(base["aux"], common, "k")
+        kb = _aux_mean(other["aux"], common, "k")
+        if ka is not None and kb is not None and abs(ka - kb) > 1e-9:
+            warns.append(
+                f"要点数 K 不同（{base['label']} {ka:.2f} vs {other['label']} "
+                f"{kb:.2f}）→ 分母变了，命中率差不能当质量差读；两臂必须用同一份黄金集"
+            )
+        return warns
     # 两条轨上「不等长」的后果不是同一件事，措辞必须分开：检索轨是指标分母被长度
     # 改变；答案轨是 faithfulness 天然偏向块数多的一臂（可验证的陈述更多、每条更
     # 容易找到依据）。后者正是 agent 臂必然踩到的那个坑。
@@ -342,6 +391,7 @@ def compare(
                 "list_len_mean": _aux_mean(g["aux"], list(g["items"]), "list_len"),
                 "ctx_len_mean": _aux_mean(g["aux"], list(g["items"]), "ctx_len"),
                 "ceiling_mean": _aux_mean(g["aux"], list(g["items"]), "ceiling"),
+                "k_mean": _aux_mean(g["aux"], list(g["items"]), "k"),
             }
             for g in loaded
         ],
@@ -411,29 +461,54 @@ def compare_retrieval(
     subset_sizes: tuple[int, ...] = (15, 30),
     bootstrap: int = 5000,
 ) -> list[dict]:
-    """一次跑齐指标族并跨指标做 Holm 校正（多臂 × 多指标 = 一个家族）。"""
+    """一次跑齐指标族并跨指标做 Holm 校正（多臂 × 多指标 = 一个家族）。
+
+    族里不是每个指标都有逐条分数：改动前的结果文件没有 `keypoint_hit`，而非聚合题
+    本来也不该有。这类指标**不进 Holm 家族**（没有配对比较就没有多重比较，把它们
+    算进分母会白白收紧其余指标的 α），但报告仍然带出来并标成 `unscored` ——
+    静默少一个指标，读的人会以为它被测了并且没差异。
+    """
     reports = [
         compare(groups, baseline, subset_sizes, bootstrap, metric=m) for m in metrics
     ]
-    apply_holm(reports)
+    live = {
+        i
+        for i, r in enumerate(reports)
+        if any(g["n_items"] for g in r["groups"]) and r["paired"]
+    }
+    apply_holm([reports[i] for i in sorted(live)])
+    for i, r in enumerate(reports):
+        r["unscored"] = i not in live
     return reports
 
 
 def format_report(report: dict) -> str:
+    if report.get("unscored"):
+        return (
+            f"== {report['metric']}：本轮无逐条分数，未参与判读与 Holm 校正 ==\n"
+            "   （结果文件里没有这个指标的键，或所有条目都缺该判据——"
+            "「未测」不等于「测了且无差异」）"
+        )
     labels = [g["label"] for g in report["groups"]]
-    is_ret = report["track"] == "retrieval"
+    track = report["track"]
+    title = {"retrieval": "检索", "answer": "答案级", "ragas": "RAGAS"}.get(
+        track, "检索"
+    )
     out = [
-        (f"== {'检索' if is_ret else 'RAGAS'} 配对判读（指标：{report['metric']}）=="),
+        f"== {title} 配对判读（指标：{report['metric']}）==",
         "",
-        f"每轮均值 / 组内重跑极差（{_NOISE_LABEL[is_ret]}）：",
+        f"每轮均值 / 组内重跑极差（{_NOISE_LABEL.get(track, _NOISE_LABEL['ragas'])}）：",
     ]
     for g in report["groups"]:
         rounds = "、".join(f"{m:.4f}" for m in g["run_means"])
         noise = (
             f"{g['noise_range']:.4f}" if g["noise_range"] is not None else "—（仅一轮）"
         )
+        # 一臂有值另一臂整段缺值时 `live` 判真（any），那臂的均值就是 None——
+        # 印成 0.0000 是把「没测」读成「测了且是零」，和 coverage_by_type 那条禁止同源
+        mean = f"{g['mean']:.4f}" if g["mean"] is not None else "—（无逐条分数）"
         out.append(
-            f"  {g['label']:<12} n={g['n_items']:<3} 均值 {g['mean']:.4f}  各轮 [{rounds}]  极差 {noise}"
+            f"  {g['label']:<12} n={g['n_items']:<3} 均值 {mean}  各轮 [{rounds}]  极差 {noise}"
         )
         lens = []
         if g["list_len_mean"] is not None:
@@ -442,6 +517,8 @@ def format_report(report: dict) -> str:
             lens.append(f"上下文 {g['ctx_len_mean']:.2f} 块")
         if g["ceiling_mean"] is not None:
             lens.append(f"覆盖率上限 {g['ceiling_mean']:.4f}")
+        if g.get("k_mean") is not None:
+            lens.append(f"要点数 K {g['k_mean']:.2f}")
         if lens:
             out.append(f"      {' · '.join(lens)}")
 

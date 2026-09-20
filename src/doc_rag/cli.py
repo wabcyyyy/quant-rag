@@ -672,6 +672,20 @@ def gen_gold(
     )
     typer.echo(f"黄金集已生成：{out_file}")
     typer.echo(f"共 {meta['count']} 条，题型分布：{meta['type_distribution']}")
+    kp = meta["aggregation_key_points"]
+    typer.echo(
+        f"    聚合题答案判据：{kp['n_with_points']}/{kp['n_aggregate_items']} 条拿到逐篇要点"
+        f"（K 均值 {kp['mean_k']}，上限 {kp['max_k']}；唯一性在 {kp['uniqueness_scope_docs']} "
+        "篇正文上判）"
+    )
+    if kp["n_with_points"] < kp["n_aggregate_items"]:
+        # 与 v3「只出到 3 条就如实打印」同一条纪律：判据覆盖率不够时，n 必须当场可见，
+        # 不然读的人会以为 keypoint_hit_ratio 是在全部聚合题上算的。
+        typer.echo(
+            f"    注意：{kp['n_aggregate_items'] - kp['n_with_points']} 条聚合题挑不出合格要点"
+            "（那个实体在语料里几乎只以纯 @ 提及出现）——答案级配对判读只在有要点的"
+            "那几条上做，报结论必须带上这个 n。"
+        )
 
 
 @app.command("census-corpus")
@@ -1211,15 +1225,18 @@ def compare_retrieval(
         list[str] | None,
         typer.Option(
             help="只判读指定指标（可重复）；默认一次跑齐 Hit@5/Hit@8/MRR/nDCG@8/"
-            "覆盖率/覆盖率对上限"
+            "覆盖率/覆盖率对上限/聚合题要点命中"
         ),
     ] = None,
 ) -> None:
-    """配对判读检索轨结果：同题配对差 + 95%CI + 符号检验 + 跨指标 Holm 校正。
+    """配对判读客观指标结果：同题配对差 + 95%CI + 符号检验 + 跨指标 Holm 校正。
 
-    逐条分数来自 `items[]`（分母 = 有 gold 的条目，拒答题不进）。除差值外还报两臂的
-    清单长度与覆盖率上限——两臂不等长时 hit/nDCG/覆盖率的差部分是长度的函数，
-    报告会把这层伪影单独标出来。
+    逐条分数来自 `items[]`。这里有两个层级的指标，都走同一套判读但**告警口径不同**：
+
+    - 检索级（hit/mrr/ndcg/覆盖率，分母 = 有 gold 的条目，拒答题不进）：两臂清单不等长
+      时差值部分是长度的函数，报告会把这层伪影单独标出来；
+    - 答案级（`keypoint_hit_ratio`，分母 = 有逐篇要点的聚合题）：只看答案文本，块数
+      不等是实验变量不是伪影；这条轨上唯一该拦的是两臂的要点数 K 不同（分母变了）。
     """
     from doc_rag.eval.compare import RETRIEVAL_METRICS, RETRIEVAL_SWEEP, format_report
     from doc_rag.eval.compare import compare_retrieval as sweep

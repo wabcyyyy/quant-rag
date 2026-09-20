@@ -10,6 +10,10 @@
 - contains_acc：非拒答题答案包含全部 must_contain 关键词
   （另有一路 `contains_acc_subseq`：字符子序列匹配，假阳性无上界，见
   `_contains_as_subsequence`——它只在「与严格口径不同值」时才提供信息）
+- keypoint_hit_ratio：聚合题的**分档**答案命中——答案命中了几条逐篇要点 / K。
+  与 contains_acc 并列而不是替换它：聚合题原先只有 1 个 must_contain（那个人名），
+  而答案集 10~56 篇，「答出 2 篇」与「答出 18 篇」同分，上下文预算消融读不出差。
+  它是纯字符串判据，**不依赖清单长度**，所以是 E2 两臂块数不等时唯一干净的指标
 - refusal_acc：拒答题答案出现拒答措辞（**只查措辞**，见 over_refusal 那条口径；
   「拒答里有没有编造」另有一条独立检查，在 `eval/refusal.py` / `doc-rag audit-refusals`）
 - citation_valid_rate / citation_presence_rate
@@ -25,6 +29,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +46,10 @@ from ..retrieve.hybrid import HybridRetriever
 from ..retrieve.rewrite_llm import endpoint_model
 from .judge import judge_cfg
 from .schema import GoldItem
+
+# 「答全」的门槛：命中 ≥ 80% 的要点。这个数是**拍的**，没有校准过——所以它只做展示
+# 分档，不进任何门禁；能被当作结论的是 `keypoint_hit_ratio` 本身。
+_GRADE_FULL_RATIO = 0.8
 
 _REFUSAL_MARKERS = [
     "无法回答",
@@ -297,9 +306,30 @@ def evaluate(
             ctx_has = all(_norm(m) in ctx_text for m in item.must_contain)
             over_refusal = bool(_refusal_ok(answer) and ctx_has and not answered_ok)
         else:
-            answered_ok = None  # 无判据（如部分聚合题），不计入 answer 准确率
+            answered_ok = None  # 无判据 → 不计入 answer 准确率（当前 72 条里只有 8 条
+            # no_answer 走到这里：聚合题是有 must_contain 的，只是只有 1 个词，所以才
+            # 另设下面的分档口径。旧注释写成「如部分聚合题」是过时的，会误导人去找
+            # 一个并不存在的判据缺口。
             answered_ok_subseq = None
             over_refusal = None
+
+        # 逐篇要点命中（分档）。与 answered_ok 完全独立：不共用判据、不改它的分母，
+        # 旧口径逐字不动。`item.key_points` 为空（旧黄金集、非聚合题）时判 None，
+        # 不进任何均值——把「未定义」印成「测出来是 0」是这个项目明令禁止的那类错误。
+        if not with_answers or not item.key_points:
+            keypoint_hit = None
+            answer_grade = None
+            n_key_points = len(item.key_points) or None
+        else:
+            hits = sum(1 for kp in item.key_points if kp.hit_in(answer))
+            k = len(item.key_points)
+            keypoint_hit = round(hits / k, 4)
+            answer_grade = (
+                "full"
+                if hits >= math.ceil(_GRADE_FULL_RATIO * k)
+                else ("half" if hits else "zero")
+            )
+            n_key_points = k
 
         refs = [int(n) for n in _CITATION_RE.findall(answer)]
         citation_valid = all(1 <= n <= len(ctx) for n in refs) if refs else None
@@ -360,6 +390,11 @@ def evaluate(
                 "filter_fallback": result.filter_fallback,
                 "answered_ok": answered_ok,
                 "answered_ok_subseq": answered_ok_subseq,
+                # 分档判据：`n_key_points` 必须逐条落盘，否则两臂的 K 是不是同一个
+                # 分母只能靠回忆（和 `n_retrieved` 同一条理由）。
+                "keypoint_hit": keypoint_hit,
+                "n_key_points": n_key_points,
+                "answer_grade": answer_grade,
                 "over_refusal": over_refusal,
                 "over_refusal_gold": over_refusal_gold,
                 "citation_valid": citation_valid,
@@ -433,6 +468,11 @@ def evaluate(
     ]
     refusables = [r for r in per_item if _is_refusable(items, r["id"])]
     cites = [r for r in per_item if r["citation_valid"] is not None]
+    # 分档命中的分母 = 真有 key_points 的那些条目。它必须和均值一起报，否则
+    # 「20 条聚合题的 0.31」与「4 条题的 0.31」读起来是同一个数。
+    kp_rows = [r for r in per_item if r["keypoint_hit"] is not None]
+    ks = [r["n_key_points"] for r in kp_rows if r["n_key_points"]]
+    grades = Counter(r["answer_grade"] for r in kp_rows if r["answer_grade"])
 
     lens = [r["n_retrieved"] for r in per_item]
     summary = {
@@ -469,6 +509,21 @@ def evaluate(
         "contains_acc_subseq": _safe_div(
             sum(1 for r in scorable if r["answered_ok_subseq"]), len(scorable)
         ),
+        # 聚合题的分档命中（macro，只看有 key_points 的条目）。它是纯字符串判据，
+        # 不受清单/上下文块数影响 → 上下文预算消融（E2）两臂块数不等时，这是唯一
+        # 不用先扣除长度伪影的答案级读数。
+        "keypoint_hit_mean": _safe_div(
+            sum(r["keypoint_hit"] for r in kp_rows), len(kp_rows)
+        ),
+        "keypoint_hit_by_type": _mean_by_type("keypoint_hit"),
+        "keypoint_n_items": len(kp_rows),
+        "keypoint_k": {
+            "min": min(ks) if ks else None,
+            "max": max(ks) if ks else None,
+            "mean": round(sum(ks) / len(ks), 2) if ks else None,
+        },
+        # 三值分档只作展示（阈值未校准，见 `_GRADE_FULL_RATIO`），不进门禁
+        "answer_grade_counts": {g: grades.get(g, 0) for g in ("full", "half", "zero")},
         # 过度拒答：两条口径，缺任何一条都会把问题看漏一半
         "over_refusal_rate": _safe_div(
             sum(1 for r in per_item if r["over_refusal"]),
