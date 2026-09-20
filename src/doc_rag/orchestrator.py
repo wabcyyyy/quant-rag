@@ -26,6 +26,7 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 
+from . import agent as agent_mod
 from .generate import synthesizer as synthesizer_mod
 from .ingest.embedder import Embedder
 from .log import get_logger
@@ -54,6 +55,10 @@ class Result:
     filter_fallback: bool = False
     n_before_fallback: int = 0
     context_budget: int | None = None
+    # agent 臂的每一步（含停机原因与预算用量）。单发路径恒为 None——
+    # 「只扩展不替换」：现有结果文件的条目形状、检索指标分母都不该因为
+    # 加了一层 policy 就悄悄变样。落盘与重放约束见 agent.py 的模块 docstring。
+    trace: dict | None = None
 
 
 def _ms(a: float, b: float) -> float:
@@ -137,6 +142,8 @@ class Orchestrator:
         force_aggregate: bool,
         plan_override: dict | None = None,
         honor_rewrite_budget: bool = False,
+        mode: str | None = None,
+        question_type: str | None = None,
     ) -> tuple[Result, Any, bool, dict[str, float]]:
         retriever, synthesizer = self._parts(kb)
         t0 = time.perf_counter()
@@ -195,11 +202,48 @@ class Orchestrator:
                 )
         t_rerank = time.perf_counter()
 
+        # ── agent 层。它只在「第一步已经跑完」之后扩展，所以单发臂与 agent 臂的第 1 步
+        # 逐字同源，两臂的差异全部落在扩展步上——这是可比性的要求，不是风格。
+        ac = agent_mod.agent_cfg(self.cfg)
+        predicted = agent_mod.predict_type(plan)
+        wants_agent = mode == "agent" or (
+            mode is None and ac["enabled"] and predicted in ac["types"]
+        )
+        trace: dict | None = None
+        if wants_agent and results:
+            results, trace = agent_mod.run_agent(
+                self.cfg,
+                question=question,
+                plan=plan,
+                retriever=retriever,
+                pool=results,
+            )
+            # 把「这条臂为什么开了 agent」记进 trace：显式 mode（评估臂）与配置开关
+            # （部署）是两条不同来源，混起来就没人能从结果反推它跑的是什么。
+            trace.update(
+                {
+                    "type_predicted": predicted,
+                    "type_requested": question_type,
+                    "type_matches_gold": agent_mod.type_matches_gold(
+                        predicted, question_type
+                    ),
+                    "mode_explicit": mode == "agent",
+                }
+            )
+        t_agent = time.perf_counter()
+
         # 进 LLM 的块数 = min(max_contexts, rerank.top_n)。重排开启时生效值仍是
         # rerank.top_n（改造前是重排把清单砍到 6，然后 [:10] 不再动它）——同一批
         # 块、同一个顺序，所以这份上下文逐字没变，只有指标的分母被修正了。
         cap = int(self.cfg["retrieval"].get("max_contexts") or 0)
-        budgets = [b for b in (cap, context_budget) if b > 0]
+        if trace is not None:
+            # agent 臂的上下文预算换成 `agent.max_contexts`，**不再**受 rerank.top_n 约束：
+            # 沿用它就把多步并集又砍回 6 块，被砍掉的正是这层存在的理由。
+            # 代价写在 PLAN §5.5 门槛 2——faithfulness 随上下文变长单调走高，所以
+            # agent 臂必须配一条同块数的对照臂，才准它进答案轨结论。
+            budgets = [int(trace["max_contexts"])]
+        else:
+            budgets = [b for b in (cap, context_budget) if b > 0]
         capped = results[: min(budgets)] if budgets else list(results)
         contexts = [
             {
@@ -232,6 +276,7 @@ class Orchestrator:
             filter_fallback=outcome.filter_fallback,
             n_before_fallback=outcome.n_before_fallback,
             context_budget=len(capped),
+            trace=trace,
         )
         marks = {
             "t0": t0,
@@ -239,13 +284,17 @@ class Orchestrator:
             "t_retrieve": t_retrieve,
             "t_rerank": t_rerank,
         }
+        if trace is not None:
+            # 只有真跑了扩展步才产出 `agent` 这一档延迟：单发路径的 latency_ms
+            # 键集合是所有延迟分位数统计的既有口径，不能因为加了层就悄悄多一键。
+            marks["t_agent"] = t_agent
         return result, synthesizer, aggregate, marks
 
     @staticmethod
     def _latency(
         marks: dict[str, float], synth_meta: dict | None, answered: bool
     ) -> dict:
-        return {
+        out = {
             "rewrite": _ms(marks["t_rewrite"], marks["t0"]),
             "retrieve": _ms(marks["t_retrieve"], marks["t_rewrite"]),
             "rerank": _ms(marks["t_rerank"], marks["t_retrieve"]),
@@ -257,6 +306,12 @@ class Orchestrator:
             else None,
             "total": _ms(time.perf_counter(), marks["t0"]),
         }
+        if "t_agent" in marks:
+            # 单独一档，不并进 `retrieval_total`：扩展步里含判定调用（那是 LLM），
+            # 而 `retrieval_total` 的口径是「不含 LLM、换模型不必重测」。端到端的
+            # `total` 自然包含它；SLO 判读要看 total 与这一档的分布。
+            out["agent"] = _ms(marks["t_agent"], marks["t_rerank"])
+        return out
 
     def answer(
         self,
@@ -272,6 +327,8 @@ class Orchestrator:
         stop_on_empty: bool = False,
         plan_override: dict | None = None,
         honor_rewrite_budget: bool = False,
+        mode: str | None = None,
+        question_type: str | None = None,
     ) -> Result:
         """跑完整管线，返回 `Result`。
 
@@ -281,6 +338,12 @@ class Orchestrator:
         `plan_override`：重放已记录的改写计划；与 `use_rewrite` 同时给时以它为准。
         `honor_rewrite_budget=True`：检索预算听改写的建议（生产口径），此时 `top_n`
         被忽略。默认 False = 用调用方给的固定预算（消融口径）。
+        `mode`：`"agent"` 强制走扩展步、`"single"` 强制不走、`None`（默认）跟随配置
+        `agent.enabled` + 分题型开关。评估臂用显式值，部署用配置——来源不同，
+        所以要落进 trace 的 `mode_explicit`。
+        `question_type`：黄金集的真题型，**只用于事后核对预测**（`type_matches_gold`），
+        不参与开关决策。理由见 `agent.predict_type`：真题型在服务侧不存在，
+        拿它当开关会让五条入口的 trace 不可比。
         """
         result, synthesizer, aggregate, marks = self._prepare(
             question,
@@ -291,6 +354,8 @@ class Orchestrator:
             force_aggregate=force_aggregate,
             plan_override=plan_override,
             honor_rewrite_budget=honor_rewrite_budget,
+            mode=mode,
+            question_type=question_type,
         )
         if not with_answer:
             result.latency_ms = self._latency(marks, None, answered=False)
@@ -321,6 +386,8 @@ class Orchestrator:
         force_aggregate: bool = False,
         require_citation: bool = True,
         stop_on_empty: bool = False,
+        mode: str | None = None,
+        question_type: str | None = None,
     ) -> Iterator[dict]:
         """流式问答，事件序列 = rewrite / delta* / citations / done。
 
@@ -335,6 +402,8 @@ class Orchestrator:
             use_rewrite=use_rewrite,
             use_rerank=use_rerank,
             force_aggregate=force_aggregate,
+            mode=mode,
+            question_type=question_type,
         )
         yield {"type": "rewrite", "plan": result.plan}
         if stop_on_empty and not result.contexts:
