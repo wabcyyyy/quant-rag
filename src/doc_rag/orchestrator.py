@@ -144,7 +144,7 @@ class Orchestrator:
         honor_rewrite_budget: bool = False,
         mode: str | None = None,
         question_type: str | None = None,
-    ) -> tuple[Result, Any, bool, dict[str, float]]:
+    ) -> tuple[Result, Any, str, dict[str, float]]:
         retriever, synthesizer = self._parts(kb)
         t0 = time.perf_counter()
 
@@ -288,7 +288,9 @@ class Orchestrator:
             # 只有真跑了扩展步才产出 `agent` 这一档延迟：单发路径的 latency_ms
             # 键集合是所有延迟分位数统计的既有口径，不能因为加了层就悄悄多一键。
             marks["t_agent"] = t_agent
-        return result, synthesizer, aggregate, marks
+        # 往外传的是**预测题型**而不是 aggregate 布尔：思考档那张表的键就是它
+        # （`synthesizer.PREDICTED_TYPES`），传布尔等于让合成层再造一次同样的判断。
+        return result, synthesizer, predicted, marks
 
     @staticmethod
     def _latency(
@@ -345,7 +347,7 @@ class Orchestrator:
         不参与开关决策。理由见 `agent.predict_type`：真题型在服务侧不存在，
         拿它当开关会让五条入口的 trace 不可比。
         """
-        result, synthesizer, aggregate, marks = self._prepare(
+        result, synthesizer, predicted, marks = self._prepare(
             question,
             kb=kb,
             top_n=top_n,
@@ -367,7 +369,7 @@ class Orchestrator:
             question,
             result.contexts,
             require_citation=require_citation,
-            aggregate=aggregate,
+            question_type=predicted,
         )
         # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta
         candidate = getattr(synthesizer, "last_meta", None)
@@ -395,7 +397,7 @@ class Orchestrator:
         事件推送。请求参数与缓存键在 `llm._build_request` 处同源，所以流式与非流式
         互相命中缓存。`stop_on_empty` 时不产出 delta，直接走到 citations/done。
         """
-        result, synthesizer, aggregate, marks = self._prepare(
+        result, synthesizer, predicted, marks = self._prepare(
             question,
             kb=kb,
             top_n=top_n,
@@ -416,7 +418,7 @@ class Orchestrator:
             question,
             result.contexts,
             require_citation=require_citation,
-            aggregate=aggregate,
+            question_type=predicted,
         ):
             pieces.append(piece)
             yield {"type": "delta", "text": piece}

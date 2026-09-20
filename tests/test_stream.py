@@ -139,10 +139,12 @@ def test_answer_stream_aggregate_override(monkeypatch):
         return iter(["x"]), {"ms": 1.0, "cached": False, "model": "m"}
 
     monkeypatch.setattr(llm_mod, "chat_stream", _fake_chat_stream)
-    syn = Synthesizer({"model": "m", "reasoning_effort_aggregate": "none"})
+    syn = Synthesizer({"model": "m", "reasoning_effort_by_type": {"cross_doc": "none"}})
     list(
         syn.answer_stream(
-            "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+            "聚合题",
+            [{"no": 1, "text": "t", "doc": "d", "page": 1}],
+            question_type="cross_doc",
         )
     )
     assert calls[0]["reasoning_effort"] == "none"
@@ -178,7 +180,7 @@ def test_query_stream_endpoint_event_sequence(monkeypatch):
         def __init__(self):
             self.last_meta = None
 
-        def answer_stream(self, q, ctx, aggregate=None, require_citation=True):
+        def answer_stream(self, q, ctx, question_type=None, require_citation=True):
             def _gen():
                 yield "第一段"
                 yield "第二段"

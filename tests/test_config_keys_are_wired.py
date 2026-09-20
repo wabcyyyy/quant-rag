@@ -19,6 +19,12 @@ SRC = ROOT / "src" / "doc_rag"
 # 整棵子树原样透传给外部 SDK，逐键查引用只会产生假阳性
 PASS_THROUGH = ("llm.headers",)
 
+# 按键域动态查值的映射：叶子键是**数据**（题型名）而不是配置项，所以「代码里出现
+# ["cross_doc"]」这个判据对它不适用。豁免的代价由别处补：`test_latency` 里有两条
+# 测试证明这张表真的被消费（列出的题型生效、没列出的跟随全局），还有一条证明
+# 键域外的写法（`term: low`）直接报错而不是静默不生效。
+TYPED_MAPS = ("llm.reasoning_effort_by_type",)
+
 
 def _leaf_paths(node: dict, prefix: str = ""):
     for key, value in node.items():
@@ -36,6 +42,8 @@ def _leaves() -> list[tuple[str, str]]:
     out = []
     for path, key in _leaf_paths(cfg):
         if any(path.startswith(p + ".") for p in PASS_THROUGH):
+            continue
+        if any(path.startswith(p + ".") for p in TYPED_MAPS):
             continue
         out.append((path, key))
     return out

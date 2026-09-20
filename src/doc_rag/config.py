@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +62,26 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
+_RETIRED_ENV = {
+    # 旧的分流键挂在 aggregate 布尔上，已被 `llm.reasoning_effort_by_type` 取代。
+    # 留着不报错的话，设了它的人会以为分流还开着——实际值已被字面量表覆盖，读都不读。
+    "DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE": "configs/default.yaml 的 llm.reasoning_effort_by_type"
+}
+
+
+def _warn_retired_env() -> None:
+    for name, replacement in _RETIRED_ENV.items():
+        if os.environ.get(name):
+            warnings.warn(
+                f"{name} 已废弃且不再被读取（改用 {replacement}）；"
+                "本行请从 .env 删掉，否则你会以为思考分流仍由它控制。",
+                stacklevel=3,
+            )
+
+
 def load_config(path: str | Path | None = None) -> dict:
     load_dotenv(ROOT / ".env")
+    _warn_retired_env()
     cfg_path = Path(path) if path else ROOT / "configs" / "default.yaml"
     with cfg_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)

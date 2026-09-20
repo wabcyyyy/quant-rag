@@ -455,7 +455,9 @@ llm:              # 合成/判断/改写 (默认同源)
   temperature: 0.0
   cache: true                    # 本地响应缓存
   reasoning_effort: ""           # 空=开思考, "none"=关思考
-  reasoning_effort_aggregate: "" # 聚合题专用档 (建议 none)
+  reasoning_effort_by_type:      # 按**预测题型**查表；未列出的跟随全局
+    cross_doc: none              # 可用键只有 single/cross_doc/time_filter
+    time_filter: none            # 填 term/fact 会直接报错（服务侧预测不到）
 
 qdrant:
   url: http://localhost:6333
@@ -502,7 +504,7 @@ eval:
 | 聚合检索 (doc_id 去重) | 跨文档题需要文档多样性 | hybrid.py:50-66, 136-144 |
 | 过滤回退保护 | 元数据字段稀疏 (doc_date 仅 18.8% 覆盖) | hybrid.py:78-84 |
 | 上下文预算 = min(max_contexts, rerank.top_n) | 控制输入 token；重排只重排序不砍清单，两臂才等长可比 | orchestrator.py:196-203, rerank.py |
-| reasoning_effort_aggregate | 聚合题关思考无损质量, 延迟 30s→2s | synthesizer.py:39,69 + configs/default.yaml:33 |
+| reasoning_effort_by_type | 聚合题关思考无损质量, 延迟 30s→2s；`low` 实测是上限不是中间档 | synthesizer.py:resolve_effort_cfg + configs/default.yaml |
 | Prompt 版本管理 (tightened/baseline) | 消融实验变量隔离；结果文件按指纹自证 | prompts.py:49,60,93 + eval/runner.py meta.prompt_fingerprint |
 | 缓存键包含 base_url | 防止同名模型不同供应商混用缓存 | llm.py:85-96 |
 | 进程内指标 + Prometheus 格式 | /metrics 需要鉴权, 不对外裸奔 | main.py:111-140, metrics.py |

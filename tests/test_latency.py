@@ -466,59 +466,122 @@ def _capture_cfg(monkeypatch):
     return seen
 
 
-def test_aggregate_uses_dedicated_effort_when_configured(monkeypatch):
-    """配置了聚合档时，聚合题用它、普通题仍走全局——分流的核心语义。"""
+def test_by_type_table_overrides_only_listed_types(monkeypatch):
+    """表里列出的题型用它，没列出的跟随全局——这张表的核心语义。"""
     from doc_rag.generate.synthesizer import Synthesizer
 
     seen = _capture_cfg(monkeypatch)
     syn = Synthesizer(
-        {"model": "m", "reasoning_effort": "", "reasoning_effort_aggregate": "none"}
+        {
+            "model": "m",
+            "reasoning_effort": "",
+            "reasoning_effort_by_type": {"cross_doc": "none", "time_filter": "none"},
+        }
     )
     ctx = [{"no": 1, "text": "t", "doc": "d", "page": 1}]
-    syn.answer("普通题", ctx)
-    syn.answer("聚合题", ctx, aggregate=True)
-    assert not seen[0].get("reasoning_effort")  # 普通题：全局空 = 不会进请求参数
-    assert seen[1]["reasoning_effort"] == "none"  # 聚合题：走专用档
+    syn.answer("单点题", ctx, question_type="single")
+    syn.answer("聚合题", ctx, question_type="cross_doc")
+    syn.answer("时间聚合题", ctx, question_type="time_filter")
+    assert not seen[0].get("reasoning_effort")  # single 不在表里 → 全局空 = 不进参数
+    assert seen[1]["reasoning_effort"] == "none"
+    assert seen[2]["reasoning_effort"] == "none"
 
 
-def test_aggregate_falls_back_to_global_when_unset(monkeypatch):
-    """未配聚合档时回落全局值——默认行为与不开关逐字一致。"""
+def test_unlisted_type_and_absent_table_both_follow_global(monkeypatch):
+    """没配表 / 没传题型时，行为与引入这张表之前逐字一致。"""
     from doc_rag.generate.synthesizer import Synthesizer
 
     seen = _capture_cfg(monkeypatch)
-    syn = Synthesizer({"model": "m", "reasoning_effort": "none"})
+    ctx = [{"no": 1, "text": "t", "doc": "d", "page": 1}]
+    Synthesizer({"model": "m", "reasoning_effort": "none"}).answer(
+        "聚合题", ctx, question_type="cross_doc"
+    )
+    assert seen[0]["reasoning_effort"] == "none"  # 回落全局
+    Synthesizer({"model": "m", "reasoning_effort": ""}).answer("q", ctx)
+    assert not seen[1].get("reasoning_effort")
+
+
+def test_explicit_empty_cell_forces_thinking_on(monkeypatch):
+    """`single: ""` 是合法配置：该题型强制开思考，即使全局是 none。
+
+    「键不存在」与「键存在但值为空」必须是两件事，否则这张表表达不出
+    「全局关思考、只给某一类留思考」这条政策。
+    """
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    seen = _capture_cfg(monkeypatch)
+    syn = Synthesizer(
+        {
+            "model": "m",
+            "reasoning_effort": "none",
+            "reasoning_effort_by_type": {"single": ""},
+        }
+    )
     syn.answer(
-        "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+        "单点题",
+        [{"no": 1, "text": "t", "doc": "d", "page": 1}],
+        question_type="single",
+    )
+    assert not seen[0].get("reasoning_effort")
+
+
+def test_unpredictable_type_key_is_rejected_not_ignored():
+    """填 `term: low` 必须炸：fact/term 是黄金集标注，服务侧预测不到。
+
+    一个读不到的配置键比没有这个键更糟——设的人会以为分档已经生效。
+    """
+    import pytest
+
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    with pytest.raises(ValueError, match="term"):
+        Synthesizer(
+            {
+                "model": "m",
+                "reasoning_effort_by_type": {"term": "low", "cross_doc": "none"},
+            }
+        )
+
+
+def test_shipped_config_splits_aggregates_without_any_env(monkeypatch):
+    """裸检出（不设任何环境变量）也必须拿到聚合题关思考这件事。
+
+    旧形状里这个行为靠 `DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE` 驱动，env 不设就静默
+    退回全开思考——默认值不该由部署环境决定。
+    """
+    from doc_rag.config import load_config
+    from doc_rag.generate.synthesizer import Synthesizer
+
+    seen = _capture_cfg(monkeypatch)
+    table = load_config()["llm"]["reasoning_effort_by_type"]
+    assert table == {"cross_doc": "none", "time_filter": "none"}
+    syn = Synthesizer(load_config()["llm"])
+    syn.answer(
+        "聚合题",
+        [{"no": 1, "text": "t", "doc": "d", "page": 1}],
+        question_type="cross_doc",
     )
     assert seen[0]["reasoning_effort"] == "none"
 
 
-def test_aggregate_unset_means_no_override(monkeypatch):
-    from doc_rag.generate.synthesizer import Synthesizer
-
-    seen = _capture_cfg(monkeypatch)
-    syn = Synthesizer({"model": "m", "reasoning_effort": ""})
-    syn.answer(
-        "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
-    )
-    assert not seen[0].get("reasoning_effort")  # 空=不进请求参数，与未配置等价
-
-
 def test_original_llm_cfg_not_mutated(monkeypatch):
-    """分流只影响本次调用：Synthesizer 的配置对象不得被原地改写。"""
+    """分档只影响本次调用：Synthesizer 的配置对象不得被原地改写。"""
     from doc_rag.generate.synthesizer import Synthesizer
 
     _capture_cfg(monkeypatch)
-    cfg = {"model": "m", "reasoning_effort_aggregate": "none"}
+    cfg = {"model": "m", "reasoning_effort_by_type": {"cross_doc": "none"}}
     syn = Synthesizer(cfg)
     syn.answer(
-        "聚合题", [{"no": 1, "text": "t", "doc": "d", "page": 1}], aggregate=True
+        "聚合题",
+        [{"no": 1, "text": "t", "doc": "d", "page": 1}],
+        question_type="cross_doc",
     )
     assert "reasoning_effort" not in cfg
+    assert cfg["reasoning_effort_by_type"] == {"cross_doc": "none"}
 
 
-def test_runner_passes_aggregate_flag_to_synthesizer(tmp_path, monkeypatch):
-    """runner 必须把聚合标志传下去，否则分流在评估路径上不生效。"""
+def test_runner_passes_predicted_type_to_synthesizer(tmp_path, monkeypatch):
+    """runner 必须把**预测题型**传下去，否则思考档那张表在评估路径上不生效。"""
     gold = tmp_path / "gold.json"
     gold.write_text(
         json.dumps(
@@ -551,7 +614,7 @@ def test_runner_passes_aggregate_flag_to_synthesizer(tmp_path, monkeypatch):
         gold, cfg={"retrieval": {}, "llm": {"model": "m"}}, aggregate=True
     )
     assert results["items"][0]["answer"] == "答案"
-    assert syn.answer.call_args.kwargs.get("aggregate") is True
+    assert syn.answer.call_args.kwargs.get("question_type") == "cross_doc"
 
 
 # ------------------------------------------------------- 逐条 token 用量（T5）

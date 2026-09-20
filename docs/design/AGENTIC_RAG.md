@@ -89,9 +89,10 @@ trace = {
 每多一步 ≈ +1 次判定调用（~0.9s）+ 1 次检索/重排（~0.5s）+ 更长 prompt。所以 agent **按题型开关**，
 默认只开 `cross_doc` 与 `time_filter`（它们既是覆盖率封顶的两类，也已有 ≤5s 的聚合 SLO 档）。
 分题型开关是本期唯一的成本控制面，必须是配置而不是代码常量。
-（现状核对：仓库里**没有** type→config 映射 —— 唯一的按题型行为 `llm.reasoning_effort_aggregate`
-键在 `aggregate` 这个布尔上而不是 `item.type` 上；`cross_doc`/`time_filter` 今天只出现在出题与
-报表侧。所以这根开关是要新建的配置形状，不是给现有键加个值。）
+（现状核对（2026-09-20 更新）：仓库里**已经有了** type→config 映射 —— `llm.reasoning_effort_by_type`，
+键域是 `agent.predict_type` 的值域（single/cross_doc/time_filter），合成侧按**预测**题型查表；
+`Synthesizer` 会对域外的键（如 `term`）直接报错，因为 fact/term 是黄金集标注、服务侧拿不到。
+agent 的分题型开关 `agent.types` 用同一个键域，两者口径一致。）
 
 ## 4. 入口一致性：扩展 parity 测试，不是绕开它
 

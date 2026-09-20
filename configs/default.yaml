@@ -25,12 +25,20 @@ llm:
   # 是聚合题端到端 25~34s 的主因（PLAN「延迟实测」）。**会改变答案，作废现有基线**。
   # 空串是 falsy，不会进请求参数，所以默认行为与改动前逐字一致。
   reasoning_effort: env:DOC_RAG_LLM_REASONING_EFFORT
-  # 聚合题专用档：cross_doc/time_filter 关思考实测两项指标都无损失
-  # （包含匹配 1.00→1.00、Faithfulness 0.936→0.979 / 1.00→0.975，n=13），
-  # 而端到端 24~32s → 2s——全项目性价比最高的延迟交易；其余题型关思考
-  # 忠实度 −6~−21pt，必须保留思考。不配则回落到上面的全局值。
-  # 推荐组合：全局留空（其余题型保质量）+ 此处设 none（聚合题砍 30s 级尾部）。
-  reasoning_effort_aggregate: env:DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE
+  # 思考档按**预测题型**查表；表里没列出的题型跟随上面的 reasoning_effort。
+  # 这张表取代了原来的 `reasoning_effort_aggregate`（那个键挂在 aggregate 布尔上，
+  # 看着像特例；键域其实只有服务侧预测得到的三类，所以直接按题型写）。
+  # 可用键：single / cross_doc / time_filter —— 填 `term: low` 会在构造 Synthesizer 时
+  # **报错**而不是静默不生效：fact/term 是黄金集标注，线上拿不到这个信息。
+  # 依据（2026-09-20 探针，真实上下文 × 3~4 次重复，关缓存）：
+  #   聚合题   none 0 token/1.7s · low 4,360/19.5s · 默认 5,463/22.9s
+  #   term 尾  low 1,195/5.9s · 默认 2,029/10.2s · none 0/1.3s（但答案形态会变）
+  #   fact     low 170 ≈ 默认 160（无差别）· none 0
+  # → 聚合题只有 `none` 这一档有意义；`low` 是个上限而非中间档（只在思考量大时起作用）。
+  # 值写成字面量而不是 env 间接：裸检出（不设任何环境变量）也必须拿到今天的分流行为。
+  reasoning_effort_by_type:
+    cross_doc: none
+    time_filter: none
   # 归因头只有 OpenRouter 需要，而默认端点是 DeepSeek 官方——所以这里不放实例值，
   # 留着就是每次请求往官方 API 多带一个 GitHub 地址。换 OpenRouter 时自行加
   # `headers: {HTTP-Referer: <你的仓库>, X-Title: doc-rag}`：整棵子树原样透传给 SDK，
