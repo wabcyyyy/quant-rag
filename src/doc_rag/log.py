@@ -28,6 +28,10 @@ _FIELDS = (
     "model",
     "cached",
     "aggregate",
+    # agent 层的两条必须能在日志里看见：步数与停机原因。少了它们，「这条请求为什么
+    # 慢/为什么拒答」在日志里就没有答案——而 trace 本身太长，不该整份塞进日志行。
+    "agent_steps",
+    "agent_stop_reason",
 )
 
 

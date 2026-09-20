@@ -17,9 +17,15 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
+from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
-from doc_rag import agent
+import doc_rag.orchestrator as orch_mod
+from doc_rag import agent, cli, metrics
+from doc_rag.api import main as api_main
+from doc_rag.eval import runner
 from doc_rag.generate import llm as llm_mod
+from doc_rag.generate import synthesizer as synth_mod
 from doc_rag.orchestrator import Orchestrator
 from doc_rag.retrieve.hybrid import RetrievalOutcome
 
@@ -149,7 +155,15 @@ def script_llm(monkeypatch):
 
     默认「多一次调用就炸」：agent 每一步都花真钱，任何一条测试要是多跑了一步判定，
     这里直接失败而不是悄悄多付一次（先例：test_rewrite_llm.py 的 `_forbidden`）。
+    改写走同一个 chat_timed，不分流就会污染判定计数，所以顺带把改写固定成「聚合题」
+    ——agent 的开关键在 aggregate/year 推出来的预测题型上，不喂它就永远开不起来
+    （CLI / API 那两条入口没有 force_aggregate 这个后门）。
     """
+    from doc_rag.retrieve.rewrite_llm import SYSTEM_REWRITE
+
+    rewrite_reply = (
+        '{"rewritten": "聚合检索串", "aggregate": true, "year": null, "reason": "test"}'
+    )
     state: dict[str, Any] = {
         "replies": [],
         "prompts": [],
@@ -158,6 +172,8 @@ def script_llm(monkeypatch):
     }
 
     def _timed(llm_cfg, user_prompt, system_prompt=None, temperature=None):
+        if system_prompt == SYSTEM_REWRITE:
+            return rewrite_reply, {"ms": 0.5, "cached": False, "model": "m"}
         if system_prompt != agent.SYSTEM_EVIDENCE:
             raise AssertionError(f"agent 只该发判定调用，收到 {system_prompt!r}")
         if state["raise_on"] is not None and len(state["prompts"]) >= state["raise_on"]:
@@ -637,3 +653,184 @@ def test_endpoint_cfg_does_not_leak_generation_key_cross_vendor():
     built = agent.endpoint_cfg(cfg)
     assert built["api_key"] == ""
     assert "headers" not in built
+
+
+# ── trace 的运输与落盘（五条入口都要能看见它） ────────────────────────────
+
+
+class _Synth:
+    last_meta: ClassVar[dict] = {"ms": 1.0, "cached": False, "model": "m"}
+
+    def answer(self, q, ctx, **kw):
+        return "答案 [1]"
+
+    def answer_stream(self, q, ctx, **kw):
+        yield "答案 "
+        yield "[1]"
+
+
+def _patch_production_parts(monkeypatch, retriever):
+    """让 CLI / API 走注入的假检索器（否则构造 Orchestrator 会去连 Qdrant）。"""
+    monkeypatch.setattr(orch_mod, "HybridRetriever", lambda **kw: retriever)
+    monkeypatch.setattr(orch_mod, "QdrantClient", lambda **kw: object())
+    monkeypatch.setattr(orch_mod, "Embedder", lambda cfg: object())
+    monkeypatch.setattr(synth_mod, "Synthesizer", lambda cfg: _Synth())
+
+
+def test_query_endpoint_returns_trace_and_counts_agent_metrics(monkeypatch, script_llm):
+    """/query 要把 trace 交回调用方，`/metrics` 要有 agent 那一组计数。
+
+    停机原因的分布是失败分类的数据源；只报平均步数会把「证据够了」和「判定挂了所以
+    停下」两类完全不同的结局混成同一个数。
+    """
+    script_llm["replies"] = [_verdict(next_query="子查询二"), _verdict(sufficient=True)]
+    cfg = _cfg()
+    cfg["api"] = {"auth_token": "t"}
+    retriever = FakeRetriever(
+        {"聚合检索串": _pool(3), "子查询二": [_chunk(1, doc="d2")]}
+    )
+    monkeypatch.setattr(
+        api_main,
+        "_orchestrator",
+        lambda: Orchestrator(cfg, retriever=retriever, synthesizer=_Synth()),
+    )
+    metrics.reset()
+    client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
+
+    body = client.post("/query", json={"question": "聚合检索串"}).json()
+    assert body["trace"]["stop_reason"] == "sufficient"
+    assert [s["action"] for s in body["trace"]["steps"]] == [
+        "check_evidence",
+        "search",
+        "check_evidence",
+    ]
+
+    out = metrics.render()
+    assert "doc_rag_agent_requests_total 1" in out
+    assert 'doc_rag_agent_stops_total{stop_reason="sufficient"} 1' in out
+    assert "doc_rag_agent_judge_degraded_total" not in out  # 这轮没有退化
+
+
+def test_stream_done_event_carries_the_same_trace(monkeypatch, script_llm):
+    """流式与非流式的 done 载荷同字段，否则只有会读 SSE 的调用方拿得到轨迹。"""
+    script_llm["replies"] = [_verdict(sufficient=True)]
+    cfg = _cfg()
+    cfg["api"] = {"auth_token": "t"}
+    retriever = FakeRetriever({"聚合检索串": _pool(2)})
+    monkeypatch.setattr(
+        api_main,
+        "_orchestrator",
+        lambda: Orchestrator(cfg, retriever=retriever, synthesizer=_Synth()),
+    )
+    client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
+    events = [
+        line
+        for line in client.post(
+            "/query/stream", json={"question": "聚合检索串"}
+        ).text.split("\n")
+        if line.startswith("data:")
+    ]
+    done = json.loads(events[-1][len("data: ") :])
+    assert done["trace"]["stop_reason"] == "sufficient"
+
+
+def test_eval_persists_trace_and_self_proving_agent_meta(
+    monkeypatch, tmp_path, script_llm
+):
+    """结果文件必须能自证它跑的是哪条 policy，并记录预测题型与真题型是否吻合。"""
+    script_llm["replies"] = [_verdict(sufficient=True)]
+    gold = tmp_path / "gold.json"
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q1",
+                        "type": "fact",
+                        "question": "聚合检索串",
+                        "expected_answer": "正文1",
+                        "source_doc_ids": ["d1"],
+                        "must_contain": ["正文1"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    retriever = FakeRetriever({"聚合检索串": _pool(3)})
+    monkeypatch.setattr(
+        runner, "_build_retriever", lambda c, col: (retriever, _Synth())
+    )
+    out = runner.evaluate(
+        gold, cfg=_cfg(), use_rerank=False, agent_mode="agent", with_answers=True
+    )
+    trace = out["items"][0]["trace"]
+    assert trace["stop_reason"] == "sufficient"
+    assert trace["mode_explicit"] is True
+    meta = out["meta"]["agent"]
+    assert meta["requested"] == "agent"
+    assert meta["n_items_with_trace"] == 1
+    assert meta["stop_reasons"] == {"sufficient": 1}
+    # 显式 agent 会绕过题型开关（那是消融臂的用途），但预测与真题型的偏差照样记账：
+    # 这条 fact 题被预测成 single，所以 hits=0——不能因为「是强制开的」就不记。
+    assert meta["type_matches_gold"] == {"n": 1, "hits": 0}
+
+
+def test_single_shot_eval_leaves_agent_meta_null(monkeypatch, tmp_path):
+    """没开 agent 时 meta.agent 必须是 null，而不是一个全零的假臂。"""
+    gold = tmp_path / "gold.json"
+    gold.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "q1",
+                        "type": "fact",
+                        "question": "问",
+                        "expected_answer": "正文1",
+                        "source_doc_ids": ["d1"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_build_retriever",
+        lambda c, col: (FakeRetriever({"问": _pool(2)}), _Synth()),
+    )
+    cfg = _cfg()
+    cfg["agent"]["enabled"] = False
+    out = runner.evaluate(gold, cfg=cfg, use_rerank=False, with_answers=True)
+    assert out["meta"]["agent"] is None
+    assert out["items"][0]["trace"] is None
+
+
+def test_agent_item_with_legacy_contexts_refuses_replay():
+    """agent 条目的并集无法靠重放单次检索还原——上下文不是编号版就拒绝，不猜。"""
+    broken_trace = {
+        "steps": [{"n": 1, "action": "check_evidence"}],
+        "stop_reason": "sufficient",
+        "budget_used": {"calls": 1, "prompt_tokens": 1, "ms": 1.0},
+    }
+    with pytest.raises(ValueError, match="agent trace"):
+        runner._retrieve_contexts(
+            "问题",
+            {"retrieval": "dense+bm25+rrf[hybrid]+rewrite", "top_n": 8},
+            retriever=FakeRetriever({}),
+            cfg=_cfg(),
+            recorded={"rewritten": "旧检索串", "trace": broken_trace},
+        )
+
+
+def test_cli_query_prints_the_agent_summary(monkeypatch, script_llm, capsys):
+    """CLI 也要看得见步数与停机原因——否则只有读 JSON 的人才知道这条答案贵在哪。"""
+    script_llm["replies"] = [_verdict(sufficient=True)]
+    cfg = _cfg()
+    _patch_production_parts(monkeypatch, FakeRetriever({"聚合检索串": _pool(3)}))
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+    res = CliRunner().invoke(cli.app, ["query", "聚合检索串"])
+    assert res.exit_code == 0, res.output
+    assert "[agent] 1 步 · 停在 sufficient" in res.output

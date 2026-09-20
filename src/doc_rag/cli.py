@@ -573,6 +573,14 @@ def query(
             typer.echo(f"[改写] {result.plan['reason']}\n")
         typer.echo(result.answer)
     assert result is not None  # 两条分支都会赋值；流式被中途掐断时不该静默出空引用
+    if result.trace:
+        t = result.trace
+        used = t["budget_used"]
+        typer.echo(
+            f"[agent] {len(t['steps'])} 步 · 停在 {t['stop_reason']} · "
+            f"子查询 {t['sub_queries'] or '（没再多查）'} · 并集 {t['n_docs_union']} 篇 · "
+            f"判定 {used['calls']} 次 / {used['prompt_tokens']} prompt tokens"
+        )
     if result.rerank_error:
         typer.echo(f"[重排失败，退回融合顺序] {result.rerank_error}")
     _echo_citations(result.citations)
@@ -652,6 +660,13 @@ def evaluate(
     mode: Annotated[
         str | None, typer.Option(help="检索模式：hybrid（默认）/ dense（消融对照）")
     ] = None,
+    agent_mode: Annotated[
+        str,
+        typer.Option(
+            help="policy 层：agent（强制多步）/ single（强制单发）/ 留空=跟随配置 "
+            "agent.enabled。**与 --mode 不是一回事**：那个数的是检索模式。"
+        ),
+    ] = "",
     aggregate: Annotated[
         bool, typer.Option(help="聚合检索：大池取块后按文档去重（跨文档题）")
     ] = False,
@@ -786,6 +801,7 @@ def evaluate(
         with_ragas=ragas,
         with_answers=not retrieval_only,
         mode=mode,
+        agent_mode=agent_mode or None,
         aggregate=aggregate,
         use_rewrite=rewrite,
         use_rerank=rerank,
@@ -803,7 +819,19 @@ def evaluate(
     )
     # 全失败会中止，部分失败只能显式提醒：一轮里混进 N 条降级样本，整轮的口径就不再纯
     meta = results["meta"]
+    ameta = meta.get("agent")
+    if ameta:
+        typer.echo(
+            f"    agent：开关来源={ameta['requested'] or '配置'} · "
+            f"题型={list(ameta['types'])} · 带 trace {ameta['n_items_with_trace']}"
+            f"/{s['n_items']} 条 · 停机分布={ameta['stop_reasons']}"
+        )
     mixed = []
+    if ameta and ameta["judge_degraded"]:
+        mixed.append(
+            f"{ameta['judge_degraded']} 条 agent 判定退化——那一步是「停」不是「判」，"
+            "成本与质量结论都要打折看"
+        )
     if meta.get("rerank_failed"):
         mixed.append(f"{meta['rerank_failed']} 条重排失败（按融合顺序送下游）")
     if meta.get("rewrite_degraded"):

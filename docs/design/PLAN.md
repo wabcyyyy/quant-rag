@@ -1190,6 +1190,21 @@ parity 扩展这四件是两条路共用的，不会白。
 顺带一条实测发现：`answer_stream` 不接受 `plan_override` 这条不对称**今天无人使用**（eval 重放走
 `answer`），所以不加投机参数；但 agent 的 trace 重放一旦要覆盖流式入口，必须先收这条。
 
+**P1 进度（同日续）：`agent.py` 与 trace 通道已落地。** 有界状态机（步数夹在 [1,3]、token 预算
+先于下一次检索生效、判定挂了退化成「停」而不是「继续查」）、`read_window`（按
+`uuid5(NAMESPACE_URL, chunk_id)` 精确取邻居点，不重新 ingest、不碰 `retriever.collection`）、
+`check_evidence`（走 `eval/judge.py` 的 endpoint 装配，但超时/重试按 `agent.*` 压下来）。
+trace 现在真的能落盘：`Result.trace` → `/query` 响应、SSE 的 `done` 载荷、eval 结果文件的条目、
+`log.py` 的 `_FIELDS`（`agent_steps` / `agent_stop_reason`）、`/metrics` 五条 agent 计数。
+重放守卫照 `rewritten` 那条纪律补：带 trace 的条目若落盘上下文不是编号版就**拒绝重放**，
+不退回单次检索去还原并集。默认 `agent.enabled: false`，五条入口的现行为逐字未变。
+
+两处判断值得留痕：① 分题型开关键在**预测**题型（改写的 aggregate/year 推出来的），不是黄金集
+真题型——真题型在服务侧不存在，拿它当开关会让五入口 trace 不可比；预测准不准改由
+`meta.agent.type_matches_gold` 事后度量。② agent 臂的上下文预算**替换**单发口径
+`min(max_contexts, rerank.top_n)`，因为砍回 6 块就砍掉了这层的理由；代价是答案轨必须先有
+同块数对照臂（P1-e，**尚未做**），在它存在之前 agent 的任何质量数字都不准进头条。
+
 ## 6. 交付物与复现命令
 
 ### 代码仓库结构

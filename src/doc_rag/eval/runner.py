@@ -30,6 +30,7 @@ from pathlib import Path
 
 from qdrant_client import QdrantClient
 
+from ..agent import agent_cfg
 from ..config import load_config
 from ..generate import prompts
 from ..generate.llm import cache_enabled
@@ -161,6 +162,15 @@ def _retrieve_contexts(
     绝不当场重跑改写：拿新一次改写的结果去配旧答案，就是把度量对象换掉了。
     """
     assert retriever is not None  # 只在需要重建时才构建（构建它要花钱）
+    if recorded and recorded.get("trace") is not None:
+        # agent 条目的上下文是「逐步判定 + 逐步检索」的产物，重放检索只能还原出
+        # 第一步那份清单——用它判旧答案等于换了度量对象。走到这里说明这份文件的
+        # 上下文不是编号版（旧格式），那就没有可重建的正确路径。
+        raise ValueError(
+            f"条目「{question[:24]}…」带 agent trace，而它的落盘上下文不是 LLM 实际"
+            "看到的那份：agent 的并集无法靠重放单次检索还原。请重跑 "
+            "`doc-rag eval --agent`（结果文件会带编号上下文）。"
+        )
     flags = meta.get("retrieval") or ""
     use_rerank = "+rerank" in flags
     force_agg = aggregate or "+aggregate" in flags
@@ -206,6 +216,7 @@ def evaluate(
     with_ragas: bool = False,
     with_answers: bool = True,
     mode: str | None = None,
+    agent_mode: str | None = None,
     aggregate: bool = False,
     use_rewrite: bool = False,
     use_rerank: bool = False,
@@ -241,6 +252,12 @@ def evaluate(
             require_citation=require_citation,
             with_answer=with_answers,
             honor_rewrite_budget=honor_rewrite_budget,
+            # `agent_mode` 与上面那个 `mode` 不是一回事：后者是检索模式（dense/hybrid），
+            # 前者是 single/agent。名字分开是因为这两个词在项目里都出现过，混用一次
+            # 就会让评估臂悄悄换掉 policy 而 meta 上还自称同一条。
+            mode=agent_mode,
+            # 真题型只进 trace 做「预测准不准」的核对，不参与开关（见 agent.predict_type）
+            question_type=item.type,
         )
         results = result.retrieved
         ctx = result.contexts
@@ -333,6 +350,10 @@ def evaluate(
                 # hit/nDCG/覆盖率的差就部分是长度的函数（重排以前正是如此）。
                 "n_retrieved": len(results),
                 "n_contexts": len(ctx),
+                # agent 臂的每一步都必须可追。判定是模型产出、不可复现的，和
+                # `rewritten` 同一个性质：不落 trace 的 agent 条目就没有重放资格
+                # （见 `_retrieve_contexts` 里那条拒绝）。单发条目恒为 null。
+                "trace": result.trace,
                 "top_n_used": result.top_n_used,
                 "rewrite_top_n": result.rewrite_top_n,
                 "filter_applied": result.filter_applied,
@@ -512,6 +533,35 @@ def evaluate(
             judge_over=judge_over,
         )
 
+    acfg = agent_cfg(cfg)
+    traces = [r["trace"] for r in per_item if r.get("trace")]
+    agent_meta: dict | None = None
+    if agent_mode or acfg["enabled"]:
+        agent_meta = {
+            "requested": agent_mode or ("config" if acfg["enabled"] else None),
+            "enabled": acfg["enabled"],
+            "types": list(acfg["types"]),
+            "max_steps": acfg["max_steps"],
+            "max_contexts": acfg["max_contexts"],
+            "max_prompt_tokens": acfg["max_prompt_tokens"],
+            "n_items_with_trace": len(traces),
+            # 停机原因的分布就是 P2/P3 要报的「失败分类」：用完步数仍答不出 vs
+            # 证据自判说够了但答案错，是两类完全不同的病。
+            "stop_reasons": {
+                reason: sum(1 for t in traces if t["stop_reason"] == reason)
+                for reason in sorted({str(t["stop_reason"]) for t in traces})
+            },
+            # 非零就说明有些「停」其实是判定挂了，成本与质量结论都要打折看
+            "judge_degraded": sum(
+                1 for t in traces if any(s.get("degraded") for s in t["steps"])
+            ),
+            # 开关建在预测题型上（服务侧拿不到真题型），所以预测本身要能被度量
+            "type_matches_gold": {
+                "n": sum(1 for t in traces if t.get("type_matches_gold") is not None),
+                "hits": sum(1 for t in traces if t.get("type_matches_gold")),
+            },
+        }
+
     results = {
         "meta": {
             "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -530,6 +580,10 @@ def evaluate(
                 else None,
             },
             "collection": retriever.collection,
+            # agent 层的口径必须自证：并集进来的块比单发多，而 faithfulness 随
+            # 上下文变长单调走高——不知道某条结果开没开 agent、开了几步，就不能拿它
+            # 跟单发基线并排读数（PLAN §5.5 门槛 2 的同一条纪律）。
+            "agent": agent_meta,
             "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
             + ("+aggregate" if aggregate else "")
             # 与 +rerank 的规则故意不同：这条串还是**重放**的输入（`_retrieve_contexts`

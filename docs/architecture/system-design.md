@@ -83,7 +83,7 @@ Result {answer, citations, plan, latency_ms, ...}
 | 1 改写 | LLM 判意图：是否聚合、是否年份、检索串是否实体聚焦 | `question` | `plan` | 关闭改写 / 超时 / JSON 坏 → `degraded=true` 的 noop plan | `retrieve/rewrite_llm.py` |
 | 2 检索 | Dense + BM25 双路 prefetch → Qdrant RRF；聚合题按 doc_id 去重；过滤结果过少则回退 | `plan.rewritten`, filters, aggregate, top_n | `RetrievalOutcome.chunks` = **retrieved** | 过滤后 `< min(3, limit)` → 去掉过滤重试并记 `filter_fallback` | `retrieve/hybrid.py` |
 | 3 重排 | 调 Rerank API，返回**全量重排**清单（不截断） | rewritten + retrieved | 重排后的完整列表 + `context_budget` | API 异常 → 保持融合顺序，`rerank_error` 必须可见 | `retrieve/rerank.py` |
-| 4 截断 | 进 LLM 的块数 = `min(max_contexts, rerank.top_n 若开重排)` | 重排后清单 | `contexts` + `citations` | `retrieved` **不被截断覆盖**（指标分母） | `orchestrator.py` `_prepare` |
+| 4 截断 | 进 LLM 的块数 = `min(max_contexts, rerank.top_n 若开重排)`；**agent 臂例外**：换成 `agent.max_contexts`（并集被砍回 6 块就没这层的意义了） | 重排后清单 | `contexts` + `citations` | `retrieved` **不被截断覆盖**（指标分母） | `orchestrator.py` `_prepare` |
 | 5 合成 | 强制 `[n]` 引用 + 无据拒答；聚合题可关思考 | **原始问题** + contexts | 答案文本 | 空上下文：CLI 可 `stop_on_empty`；eval 不 stop（拒答本身被测） | `generate/synthesizer.py`, `prompts.py` |
 
 ### 2.2 API 行为（改服务前必读）
@@ -187,6 +187,8 @@ uv run doc-rag profile    # Phase0 语料画像
 ```text
 src/doc_rag/
 ├── orchestrator.py          # 在线管线唯一装配点
+├── agent.py                 # policy 层：有界多步 + 证据自判 + read_window + trace
+│                            #   （`agent.enabled` 默认 false；开关与预算全在配置，PLAN §5.5）
 ├── config.py                # 配置加载（yaml + env: 前缀）
 ├── net.py                   # 统一 HTTP 重试判定（429/5xx/超时才重试）
 ├── log.py / metrics.py      # 结构化日志 / 进程内 Prometheus 指标
@@ -413,6 +415,7 @@ context_budget
 | 入口请求字段 / 鉴权 / 限流 | `api/main.py` | 白名单 `allowed_collections`；fail-closed |
 | CLI 参数与输出 | `cli.py` | 与 API/demo/eval 的 Orchestrator 调用方式保持一致 |
 | 管线顺序、截断、Result 字段 | `orchestrator.py` | parity 测试；指标分母纪律 |
+| agent 的步数/预算/停机条件 | `agent.py` | 判定不可复现 → trace 必须落盘，缺 trace 的 agent 条目拒绝重放（`eval/runner._retrieve_contexts`）；开 agent 会**替换**第 4 步的上下文预算 |
 | PDF 解析 / 表格 / 碎化行 | `ingest/pdf.py` | IR 字段；页码/引用 |
 | docx 解析 | `ingest/office.py` | LibreOffice 依赖 |
 | 中间 JSON 字段 | `ingest/schema.py` | 下游 chunker/indexer/eval 全连坐 |

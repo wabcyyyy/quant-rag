@@ -126,6 +126,19 @@ def _record(result, *, endpoint: str) -> None:
     if result.filter_fallback:
         # 过滤后结果太少 → 这轮其实是「无过滤」。它悄悄改变答案依据，必须能看见。
         metrics.inc("doc_rag_filter_fallback_total")
+    trace = result.trace
+    if trace:
+        # agent 层的四条：开了几步、停在哪、花了多少、有多少「停」其实是判定挂了。
+        # 停机原因的分布就是失败分类的数据源，只报平均步数会把两类病混成一个数。
+        steps = trace.get("steps") or []
+        metrics.inc("doc_rag_agent_requests_total")
+        metrics.observe_ms("doc_rag_agent_ms", result.latency_ms.get("agent"))
+        metrics.inc("doc_rag_agent_steps_total", by=len(steps))
+        metrics.inc(
+            "doc_rag_agent_stops_total", stop_reason=str(trace.get("stop_reason"))
+        )
+        if any(s.get("degraded") for s in steps):
+            metrics.inc("doc_rag_agent_judge_degraded_total")
 
 
 @app.get("/health")
@@ -163,6 +176,8 @@ def query(body: QueryIn) -> dict:
                 "aggregate": result.plan.get("aggregate"),
                 "model": (result.synth_meta or {}).get("model"),
                 "cached": (result.synth_meta or {}).get("cached"),
+                "agent_steps": len((result.trace or {}).get("steps") or []),
+                "agent_stop_reason": (result.trace or {}).get("stop_reason"),
             },
         )
         _record(result, endpoint="query")
@@ -177,6 +192,9 @@ def query(body: QueryIn) -> dict:
         # 延迟口径（PLAN「延迟口径」）：synth_cached 为真时 synthesize 是缓存查询
         # 耗时而非模型延迟，客户端据此决定要不要信这个数
         "latency_ms": result.latency_ms,
+        # agent 臂的逐步轨迹；单发路径是 null。调用方要用它核对成本，
+        # 也要能在事后回答「这条答案是哪几步检索拼出来的」。
+        "trace": result.trace,
     }
 
 
@@ -221,6 +239,9 @@ def query_stream(body: QueryIn):
                         {
                             "latency_ms": ev["result"].latency_ms,
                             "rerank_error": ev["result"].rerank_error,
+                            # 与 /query 的 done 载荷同字段：流式调用方也要能事后
+                            # 核对「这条答案是那几步检索拼出来的」
+                            "trace": ev["result"].trace,
                         },
                     )
                 else:
