@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import json
 import re
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
 
+from doc_rag import agent
 from doc_rag.api import demo as demo_mod
 from doc_rag.api import main as api_main
 from doc_rag.eval import runner
@@ -32,13 +34,17 @@ from doc_rag.orchestrator import Orchestrator
 from doc_rag.retrieve.hybrid import RetrievalOutcome
 
 QUESTION = "客服系统升级的预算是多少？"
+SUB_QUERY = (
+    "子查询二"  # agent 第二步的检索串；SpyRetriever 靠它区分「第一次」与「扩展步」
+)
 N_RETRIEVED = 12
 MAX_CONTEXTS = 10
+AGENT_CONTEXTS = 12  # agent 臂替换单发口径的那份预算（configs 里的 agent.max_contexts）
 _CTX_HEAD = re.compile(r"^\[\d+\] ", re.MULTILINE)
 
 
-def _cfg():
-    return {
+def _cfg(agent_on: bool = False):
+    cfg = {
         "llm": {"model": "m", "base_url": "http://l", "api_key": "k"},
         "retrieval": {"mode": "hybrid", "max_contexts": MAX_CONTEXTS},
         "rerank": {
@@ -62,6 +68,18 @@ def _cfg():
             "dense_dim": 1024,
         },
     }
+    if agent_on:
+        cfg["agent"] = {
+            "enabled": True,
+            "types": ["cross_doc", "time_filter"],
+            "max_steps": 3,
+            "judge_contexts": 6,
+            "max_contexts": AGENT_CONTEXTS,
+            "max_prompt_tokens": 100_000,
+            "timeout_s": 20,
+            "max_attempts": 1,
+        }
+    return cfg
 
 
 class SpyRetriever:
@@ -78,19 +96,31 @@ class SpyRetriever:
         SpyRetriever.collections.append(collection)
 
     def retrieve(self, question, **kw):
-        return RetrievalOutcome(
-            chunks=[
+        chunks = [
+            {
+                "doc_id": f"d{i}",
+                "title": f"文档{i}",
+                "page": i,
+                "text": f"正文{i}",
+                "block_type": "paragraph",
+                "score": 1.0 - i / 100,
+            }
+            for i in range(N_RETRIEVED)
+        ]
+        if question == SUB_QUERY:
+            # agent 的第二步要真带回来一篇新文档，否则「并集」在替身下永远等于
+            # 第一步，测试会去断言一个根本没发生的行为（并直接 no_new_evidence 停住）。
+            chunks.append(
                 {
-                    "doc_id": f"d{i}",
-                    "title": f"文档{i}",
-                    "page": i,
-                    "text": f"正文{i}",
+                    "doc_id": "d_new",
+                    "title": "文档新",
+                    "page": 99,
+                    "text": "正文新",
                     "block_type": "paragraph",
-                    "score": 1.0 - i / 100,
+                    "score": 0.5,
                 }
-                for i in range(N_RETRIEVED)
-            ]
-        )
+            )
+        return RetrievalOutcome(chunks=chunks)
 
 
 class SpyReranker:
@@ -108,19 +138,55 @@ class SpyReranker:
 
 
 @pytest.fixture
-def prompt_spy(monkeypatch):
+def judge():
+    """agent 判定的脚本。`replies` 是**每条入口一份**，驱动每条之前会清空 `calls`。
+
+    为什么必须可重置也不许多跑：五条入口各跑一遍，判定输出必须逐字相同，否则
+    「trace 步数逐项相等」根本没有可比对象——这是 PLAN §5.5 把 parity 扩到 agent mode
+    的唯一前提（判定本身不可复现，mock 里不脚本化就没法断言）。
+    """
+    return SimpleNamespace(replies=[], calls=[])
+
+
+@pytest.fixture
+def prompt_spy(monkeypatch, judge):
     """拦在 llm 层：记录真实 Synthesizer 拼出来的 prompt，而不是替身的答案。
 
-    改写阶段也走同一个 chat_timed，因此必须按 system_prompt 分流——只记答案侧的
-    调用（否则「六次合成」会数成十二次），且各条路径共用同一份改写结果，
-    parity 比较才不被改写抖动污染。
+    三个调用方共用同一个 chat 入口（改写 / agent 判定 / 合成），必须按 system_prompt
+    分流：只把答案侧的调用记进 `seen`（否则「六次合成」会数成十八次），判定调用记进
+    `judge`——它的次数与 token 就是 agent mode 下要比的那几项。
     """
     from doc_rag.retrieve.rewrite_llm import SYSTEM_REWRITE
 
     seen: list[dict] = []
 
     def _rewrite_reply(user_prompt: str) -> str:
-        return '{"rewritten": "改写后的检索串", "aggregate": false, "year": null, "reason": "test"}'
+        # aggregate=true：agent 的分题型开关键在改写预测出来的题型上，
+        # 不喂聚合意图就只有合成侧一条臂可比，agent 那条永远开不起来。
+        return (
+            '{"rewritten": "改写后的检索串", "aggregate": true, "year": null,'
+            ' "reason": "test"}'
+        )
+
+    def _evidence(user_prompt: str) -> str:
+        i = len(judge.calls)
+        assert i < len(judge.replies), (
+            f"判定调用超出脚本喂的份数（第 {i + 1} 次）——agent 多走了一步，"
+            "预算或停机条件写坏了"
+        )
+        judge.calls.append({"user": user_prompt})
+        return judge.replies[i]
+
+    def _evidence_meta() -> dict:
+        # token 固定：agent 的预算按 prompt token 封顶，跨入口必须逐项相等
+        return {
+            "ms": 0.4,
+            "cached": False,
+            "model": "m",
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "reasoning_tokens": 0,
+        }
 
     def _timed(llm_cfg, user_prompt, system_prompt=None, temperature=None):
         if system_prompt == SYSTEM_REWRITE:
@@ -129,6 +195,8 @@ def prompt_spy(monkeypatch):
                 "cached": False,
                 "model": "m",
             }
+        if system_prompt == agent.SYSTEM_EVIDENCE:
+            return _evidence(user_prompt), _evidence_meta()
         seen.append({"user": user_prompt, "system": system_prompt})
         return "答案 [1]", {"ms": 1.0, "cached": False, "model": "m"}
 
@@ -139,12 +207,33 @@ def prompt_spy(monkeypatch):
                 "cached": False,
                 "model": "m",
             }
+        if system_prompt == agent.SYSTEM_EVIDENCE:
+            raise AssertionError("证据判定不该走流式：它是一次二元判定")
         seen.append({"user": user_prompt, "system": system_prompt})
         return iter(["答案 ", "[1]"]), {"ms": 1.0, "cached": False, "model": "m"}
 
     monkeypatch.setattr(llm_mod, "chat_timed", _timed)
     monkeypatch.setattr(llm_mod, "chat_stream", _stream)
     return seen
+
+
+@pytest.fixture
+def trace_spy(monkeypatch):
+    """接住每条入口产出的 trace。
+
+    在 `run_agent` 这一层收而不是从各入口的返回值里读：这样「某条入口悄悄没走 agent 层」
+    会直接表现为 traces 少一份，而不是六个 trace 都长得一样地错。
+    """
+    real = agent.run_agent
+    traces: list[dict] = []
+
+    def _spy(cfg, **kw):
+        union, trace = real(cfg, **kw)
+        traces.append(trace)
+        return union, trace
+
+    monkeypatch.setattr(agent, "run_agent", _spy)
+    return traces
 
 
 @pytest.fixture
@@ -201,22 +290,35 @@ ENTRIES: tuple[str, ...] = (
 )
 
 
-def _drive_all_entries(monkeypatch, tmp_path, cfg):
-    """把五条入口各跑一遍，各自触发一次合成；返回与调用顺序同名的清单。"""
+def _drive_all_entries(monkeypatch, tmp_path, cfg, judge=None):
+    """把五条入口各跑一遍，各自触发一次合成；返回与调用顺序同名的清单。
+
+    `judge` 非空时每条入口之前清空判定脚本的游标：agent mode 下五条入口必须看到同一份
+    判决序列，否则步数/token 逐项相等这条断言没有意义。
+    """
     from typer.testing import CliRunner
 
     from doc_rag import cli as cli_mod
 
+    def _reset():
+        if judge is not None:
+            judge.calls.clear()
+
     monkeypatch.setattr(api_main, "_orchestrator", lambda: Orchestrator(cfg))
     client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
 
+    _reset()
     client.post("/query", json={"question": QUESTION})
+    _reset()
     client.post("/query/stream", json={"question": QUESTION})
+    _reset()
     list(demo_mod.render_answer(Orchestrator(cfg), QUESTION))
+    _reset()
     _drive_eval_one(monkeypatch, tmp_path, cfg)
 
     monkeypatch.setattr(cli_mod, "load_config", lambda *a, **k: cfg)
     for args in (["query", QUESTION], ["query", QUESTION, "--stream"]):
+        _reset()
         res = CliRunner().invoke(cli_mod.app, args)
         assert res.exit_code == 0, f"{args} 退出码 {res.exit_code}：{res.output}"
 
@@ -236,6 +338,67 @@ def test_every_entry_sends_identical_prompt(monkeypatch, tmp_path, wired):
     # 截断：max_contexts 对每条入口同样生效
     for entry, user in zip(entries, users, strict=True):
         assert len(_CTX_HEAD.findall(user)) == MAX_CONTEXTS, entry
+
+
+# ── mode 维度：agent 臂下五条入口同样要逐项相等 ─────────────────────────
+
+# 两步停：先判「不够 + 再查子查询二」，再判「够了」。判决序列脚本化是 mock 下能
+# 比 trace 的唯一前提（见 judge fixture 的 docstring）。
+AGENT_SCRIPT = (
+    json.dumps(
+        {
+            "sufficient": False,
+            "missing": "缺另一半决定",
+            "next_query": SUB_QUERY,
+            "widen_around": [],
+        },
+        ensure_ascii=False,
+    ),
+    '{"sufficient": true, "missing": "", "next_query": "", "widen_around": []}',
+)
+
+
+def test_agent_mode_traces_match_across_all_entries(
+    monkeypatch, tmp_path, wired, trace_spy, judge
+):
+    """agent mode 追加的 parity：步数、每步 action 集合、调用次数、token 合计逐项相等。
+
+    这是 §4 那条「五入口一致性」在 agent 层的延伸。任何一条入口悄悄绕过 policy 层
+    （或自己多带一份默认预算），这里都会表现为 trace 少一份或某一项不等。
+    """
+    cfg = _cfg(agent_on=True)
+    judge.replies = list(AGENT_SCRIPT)
+    entries = _drive_all_entries(monkeypatch, tmp_path, cfg, judge)
+
+    assert len(trace_spy) == len(entries), f"有入口没走 agent 层：{entries}"
+    actions = [tuple(s["action"] for s in t["steps"]) for t in trace_spy]
+    assert set(actions) == {("check_evidence", "search", "check_evidence")}, actions
+    assert {t["stop_reason"] for t in trace_spy} == {"sufficient"}
+    assert len({t["budget_used"]["calls"] for t in trace_spy}) == 1
+    assert len({t["budget_used"]["prompt_tokens"] for t in trace_spy}) == 1
+    assert len({tuple(t["sub_queries"]) for t in trace_spy}) == 1
+    # 并集进来的新文档也要一致：某条入口少并了一篇，答案就不是同一批证据
+    assert len({t["n_docs_union"] for t in trace_spy}) == 1
+
+
+def test_agent_mode_widens_the_answer_prompt_by_design(wired, judge):
+    """agent 臂进 LLM 的块数由 `agent.max_contexts` 替换单发口径——这条锁的是「口径不混用」。
+
+    两臂的 prompt 本来就该不同（更多证据是这层存在的理由），但差值必须是**配置里写着
+    的那个值**，不能是某条入口顺手多带几块。反过来它也警告读数字的人：agent 臂与单发
+    臂的 faithfulness 不可直接对读，要等长对照臂（PLAN §5.5 门槛 2）。
+    """
+    judge.replies = [
+        '{"sufficient": true, "missing": "", "next_query": "", "widen_around": []}'
+    ]
+    Orchestrator(_cfg()).answer(QUESTION)
+    single = len(_CTX_HEAD.findall(wired[-1]["user"]))
+    Orchestrator(_cfg(agent_on=True)).answer(QUESTION)
+    widened = len(_CTX_HEAD.findall(wired[-1]["user"]))
+
+    assert single == MAX_CONTEXTS
+    assert widened == AGENT_CONTEXTS
+    assert len(judge.calls) == 1  # 证据够 → 只付一次判定，没有第二次检索
 
 
 def test_kb_param_does_not_stick_across_requests(monkeypatch, wired):
