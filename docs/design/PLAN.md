@@ -487,10 +487,49 @@ fact/term 居中。
 
 → **P95 ≤ 8s 只有全关思考能达成**；分流消灭 30s 级尾部（聚合题全部 ≤3.1s）且质量不变，
 但剩余 8 条超标的都是短答题上的思考开销（term 单条 28s、答案仅 308 字——思考量不与答案长度成正比）。
- DeepSeek API 也接受 `reasoning_effort: low/medium`（实测接受、仍产生思考 token），
-效果未按规模测，暂不作为选项。
+ DeepSeek API 也接受 `reasoning_effort: low/medium`。**2026-09-20 按规模测过了，结论是不采纳**
+（下面「low 档实测」一段），所以表里仍然只填聚合两格。
 
-> **✅ 已拍板启用（2026-09-18，用户委托执行）**：`.env` 设 `DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE=none`。
+**low 档实测（2026-09-20）· 结论：不采纳，但理由和直觉相反。**
+
+先做成一次**只动非聚合侧**的对照（聚合两格在档位表里不变 → 两臂聚合答案逐字相同，
+这既是设计也是内部对照，实测 20/20 相同、`cross_doc`/`time_filter` 的 faithfulness
+逐字相同，确认这一臂没有污染聚合侧）：
+
+| 读数 | 现分流（非聚合=默认思考） | 非聚合改 `low` | 差 |
+|---|---|---|---|
+| 端到端 p50 / p95（真延迟，全部未命中） | 3874 / 17102（已发布基线） | **2993 / 13796** | −23% / −19% |
+| 思考 token 占输出 | 91%（历史值） | **89%**（37,073 / 52 条 = 713/条） | 几乎没变 |
+| `answered_ok`（配对 n=72） | 0.8472 | 0.8611 | +1.4pt，CI [−2.8,+5.6]，赢/输/平 2/1/69，p=1.0 |
+| faithfulness（配对 n=64） | 0.9279 | 0.8884 | **−3.95pt**，CI [−9.58,+0.73]，赢/输/平 9/11/44，p=0.824 |
+| └ 分题型 faithfulness | term 0.9097 · fact 1.0 · decision 0.9106 · open 0.8629 | **term 0.7292** · fact 0.9792 · decision 0.8886 · open 0.8739 | term −18.1pt，CI [−45.1,+6.3] |
+
+三条判读：
+
+1. **省得不多，而且没省到点上**：p50/p95 各降两成左右，但思考仍占输出的 89%——
+   `low` 是个**上限**不是中间档：探针实测它只在思考量本来就大的请求上起作用
+   （term 慢尾 2,029→1,195 token、10.2s→5.9s），轻项上等于不传（fact 160 vs 170、
+   term 轻项 337 vs 363），而**聚合题上只砍 20% 思考（5,463→4,360、22.9s→19.5s）**
+   ——所以「全局 low 取代这张表」会把聚合题从 1.7s 拉回 19.5s，直接破「聚合 ≤5s」。
+2. **质量这条不能判"无损"**：`answered_ok` 完全读不出差别，faithfulness 点估计
+   −3.95pt 超了 1.9pt 的 judge 地板，但配对符号检验 p=0.824、CI 跨 0；损失集中在
+   term（−18.1pt，CI 宽到 [−45,+6]，n=12），5 个大动条目里 4 条向下、其中 2 条
+   1.00→0.00。而本节早已记过条目级 faithfulness 不可复现（同一答案三次判
+   0.167/1.0/0.167）→ **本轮既不能给 low 放行，也不能宣布它已被证明有害**。
+3. **决定：不采纳，现状不动。** 理由是这轮真正的不对称——现分流的「聚合关思考」
+   有大 n 的两项无损证据，`low` 只有一轮 n=64/72、CI 跨 0 的读数。要翻案需要
+   扩样本 + 同配置重跑 judge 取极差，而收益只有两成延迟，不值得优先。
+   档位表本身保留：它把「特例」变成了「按预测题型的策略声明」，并且**默认值不再
+   依赖 `.env`**（裸检出也能拿到分流），域外键（`term: low`）直接报错而不是静默失效。
+
+配套新增一档判读能力：`compare-retrieval --metric answered_ok` 现在可以配对判答案轨。
+它**故意不叫 `contains_acc`**：summary 里那个的分母是 `scorable`（非拒答且有判据，64 条），
+而这个指标能取到的最大集合是所有 `answered_ok` 非 None 的条目（含拒答题，72 条）。
+差值不受影响（两臂同分母），均值不许借那个名字。
+
+> **✅ 已拍板启用（2026-09-18，用户委托执行）**：当时是 `.env` 设 `DOC_RAG_LLM_REASONING_EFFORT_AGGREGATE=none`；
+> 2026-09-20 换成 `configs/default.yaml` 的字面量表 `llm.reasoning_effort_by_type`（行为不变，
+> 但默认值不再依赖部署环境，且 env 里残留旧键会被 `load_config` 警告）。
 > **实测验证（黄金集 v1 全量重跑 `fenliu_on_v1.json`，13 条聚合题全部真实合成）**：
 >
 > | 指标 | 开思考（旧默认） | 分流后（实测） |
@@ -1143,10 +1182,78 @@ parity 扩展这四件是两条路共用的，不会白。
 uv run doc-rag eval --rewrite --rerank --max-contexts 6    # 臂 A：现产品口径（6 块）
 uv run doc-rag eval --rewrite --rerank --max-contexts 25   # 臂 B：多喂块
 uv run doc-rag compare-ragas <A 的结果文件> <B 的结果文件>  # 文件名带时间戳，CLI 会打印
+uv run doc-rag compare-retrieval --group 臂A=<A文件> --group 臂B=<B文件> \
+    --metric keypoint_hit_ratio                             # E2 的主读数
 ```
-判读只看**答案级**：`contains_acc`（must_contain 逐条命中）与分题型的要点命中；
-Faithfulness 那一列会被刚补上的等长告警标成伪影 —— 这是预期的，两臂块数本来就不同，
-它正是那条护栏该说话的地方。结果文件的 `meta.context_budget` 会记下两臂各自的生效预算。
+判读只看**答案级**，而这里原先有一句过时的话：它写着「`contains_acc`（must_contain
+逐条命中）与分题型的要点命中」，可 gold v2 的 20 条聚合题**每条只有 1 个 must_contain**
+（就是那个人名），而答案集 10~56 篇——「答出 2 篇」与「答出 18 篇」在 contains_acc 上
+同分，两臂必然都是 1.0。所以 E2 的 arm 判据换成了真正分档的那一个：
+
+- **主指标 `keypoint_hit_ratio`**（`eval/runner.py`，逐篇要点命中数 / K）：聚合题的每条
+  gold 文档贡献一个**全库唯一、且除名字之外真的主张了件事**的逐字短语
+  （`goldgen._key_points`，零 LLM）。它是纯字符串判据，**不依赖清单/上下文块数**，
+  所以两臂块数不等时它是唯一不用先扣除长度伪影的答案级读数——`compare-retrieval`
+  把它标成 `answer` 轨（噪声标签与告警口径都分开），块数不等**不再**触发等长告警，
+  而两臂 K 不同才触发（那才是分母变了）。
+- `contains_acc` 降级为次要读数（对聚合题它只回答「提没提到那个人」）。
+- Faithfulness 那一列会被刚补上的等长告警标成伪影 —— 这是预期的，两臂块数本来就不同，
+  它正是那条护栏该说话的地方。结果文件的 `meta.context_budget` 会记下两臂各自的生效预算。
+
+**判据覆盖率是量出来的一件事，不是假设**：真实语料重生成后 20 条聚合题里 **17 条**
+拿得到要点（`meta.aggregation_key_points` 随文件自证），K 为 1~7、均值 3.88；
+3 条 K=0（q046/q049/q063，那三个人的出现几乎全是纯 `@` 提及，挑不出既含实体又
+唯一还主张了件事的句子）。K=0 的条目该指标判 **None 不进分母**，所以 E2 的答案级
+配对是在 17 条上做的——报结论时必须带上这个 n。
+
+**E2 跑完了（2026-09-20）· 结论：多喂块买到了答案质量，但买不起延迟；且「纯上下文消融」在这条链路上不是良定义的操作。**
+
+三臂（同一份 gold v2、同 `--rewrite --rerank`，逐条判据为 A 阶段修好反斜杠后的版本）：
+
+| 臂 | 检索清单 | 进 LLM 块数 | `keypoint_hit_ratio`（macro, n=17） | 可答上限（micro，原句进上下文） | 逐字命中（micro） | 捕获率 |
+|---|---|---|---|---|---|---|
+| A 现产品口径 | 固定 top-8 | 6 | **0.1951** | 25.8% | 16.7% | 64.7% |
+| B 只动 `--max-contexts 25` | 固定 top-8 | **被截在 8** | 0.1676 | 28.8% | 15.2% | 52.6% |
+| C 同时 `--top-n 25` | top-25 | 25 | **0.4623** | 53.0% | 37.9% | **71.4%** |
+
+- **A → C 是本轮唯一有效的那个对照**：同题配对差 **+26.7pt**，95%CI [+10.9, +42.7]，
+  赢/输/平 10/2/5，符号检验 p=0.0386（Holm 家族 = 1）。分题型：cross_doc 0.111→0.367
+  （n=6）、time_filter 0.241→0.515（n=11）。三值分档 full/half/zero 从 1/7/9 变 5/6/6。
+- **这条提升不是「格子数」伪影**：与检索轨那次相反（`coverage_vs_ceiling` 0.8906→0.8723，
+  涨的是清单长度），这里**捕获率也升**了（64.7% → 71.4%）——多进来的文档被真的用进了
+  答案，不只是分母变大。
+- **B 臂解释了为什么「纯上下文消融」不成立**：`context_budget` 落盘是
+  `{max_contexts:25, rerank_top_n:25}`，而 `n_retrieved` 只有 8 —— **清单比预算短，
+  预算就被截住**。喂不进没检回来的文档，所以只动 `--max-contexts` 最多只能从 6 块到
+  8 块，而 2 块的变化没有可测效应（−2.75pt，CI [−11.8, +3.5]，p=1.0）。
+  → **E2 的正确形态是「检索预算 + 上下文预算」的合并臂**，这一点写进结论而不是留在踩坑记录里。
+- **代价（决定它不进默认口径）**：C 臂 72 次真调用、输入 489,776 / 输出 70,547 tokens
+  ≈ **6,803 输入 token/条**，是 A 臂未命中条目（~1,980/条）的 **3.4 倍**。答案长度
+  同步翻倍（与缓存无关，可直接配对比）：cross_doc 570.8 → 981.8 字，time_filter
+  668.8 → 1452.3 字。C 臂本轮合成**全部未命中**（`cache_contaminated: false`），
+  所以它的延迟是真数：cross_doc 端到端 p50 3535 / p95 8642.7ms，time_filter
+  p50 4885.6 / **p95 12551.9ms** → 对照 README 里「聚合 ≤5s」的现基线（cross_doc
+  p95 3.7s / time_filter 6.2s）是**明显恶化**。⚠ 与 A 臂的延迟差**不可读**（A 被缓存
+  污染，`cache_contaminated: true`、45 条命中），要拿延迟差必须 `--fresh-answers` 再跑一轮 A。
+- **所以放行判定是「有条件 go」**：答案质量方向成立，但把默认口径从 6 块推到 25 块会
+  同时作废 README 头条质量基线与聚合 SLO，本轮**不改 `configs/default.yaml`**。
+  C 臂的正确用途是**P3 那条「同块数对照臂」**——§5.5 门槛 2 要求 agent 臂必须有
+  single-shot @25 块的对照才准进答案轨结论，这份文件现在已经在库里
+  （`results_20260920_210500_kc.json`）。
+- 顺带用生产数据钉死了 A 阶段的动机：`contains_acc` 在这 17 条聚合题上**三臂恒为 1.0**
+  （饱和），而 `keypoint_hit_ratio` 读得出 26.7pt 的差与逐条方向。
+- **口径缺口，别当成已完成**：① 判据是逐字命中，上限内仍有 28.6%（C）的要点没答出来，
+  其中多少是模型换措辞被冤枉——用最长公共子串归因过（A 臂上限内 7 条未命中里 3 条
+  ≥8 字重合），随后把 `@`/`_`/`\`/`*` 这些**装饰字符**从匹配口径里剔掉，实测救回
+  **A 臂 2 条、C 臂 5 条**（成因：`__…__` 强调、`2\.3` 与 `\-` 的 markdown 转义），
+  但**没有全量人工核对**剩下的；所以 `keypoint_hit_ratio` 的绝对值只配横向比臂，
+  不配当「答对了多少」的读数；② 本指标的同配置
+  重跑噪声地板**未实测**，p=0.0386 的可信度目前只建立在 CI 下界 +10.9pt 上；
+  ③ n=17 条题 / 66 条要点，功效有限。
+- 复现：三臂命令见上表对应的 `eval --rewrite --rerank [--top-n 25] --max-contexts N`；
+  判据修正后统一走 `python scripts/rescore_keypoints.py <结果文件>` 离线重判
+  （答案不依赖要点，故与重跑合成逐字等价，¥0），再 `compare-retrieval --metric
+  keypoint_hit_ratio` 读配对差。
 
 **草案转入本节时的代码复核改掉了 5 处**（草案文字与仓库不符，一律以下面这版为准）：
 
@@ -1172,8 +1279,9 @@ Faithfulness 那一列会被刚补上的等长告警标成伪影 —— 这是�
 
 **必须做成配置、不能是代码常量的三件**：分题型开关（默认只开 `cross_doc` / `time_filter`）、
 每步 `contexts` 上限、每步自己的 `timeout_s` / `max_attempts`（沿用 W3 教训：可退化的步骤不该有
-12 分钟的等待能力）。现状是仓库里**没有** type→config 映射，唯一的按题型行为
-`llm.reasoning_effort_aggregate` 键在 `aggregate` 这个布尔上而非 `item.type`。
+12 分钟的等待能力）。现状（2026-09-20 已改）：仓库里**已有** type→config 映射
+`llm.reasoning_effort_by_type`，键域 = `predict_type` 的值域（`single|cross_doc|time_filter`），
+域外键在构造 `Synthesizer` 时报错；`agent.types` 用同一个键域，两根开关口径一致。
 预算按 **token + 超时双封顶**，步数只是第三道（第 3 步 `check_evidence` 的输入是第 1 步的 2~3 倍，
 长上下文已实测会撞超时 —— `eval.judge.timeout_s` 60→180 就是这么来的）。
 
@@ -1185,7 +1293,7 @@ Faithfulness 那一列会被刚补上的等长告警标成伪影 —— 这是�
 | 期 | 内容 | 依赖 | 花费 | 不达标就不进下一期 |
 |---|---|---|---|---|
 | ~~P0~~ | F1/F2/F3 拍板 + 本节 | — | 0 | ✅ 2026-09-20 |
-| P0.5 | ① E2 上下文预算消融（**未跑，仍是 P2/P3 的放行闸**）· ② 表格密度普查 | ①Qdrant+key ②无 | ①≈¥2~4 ②**¥0** | ✅ ②已完成并**否证 §1 第 3 条**：可对齐的跨篇数值标签只剩 1 个 → v3 新题型降到两类（见本节末）；①判「多喂块 → 答案要点命中」升不升 |
+| P0.5 | ① E2 上下文预算消融（**已跑完，见本节末：+26.7pt 但默认口径不动**）· ② 表格密度普查 | ①Qdrant+key ②无 | ①实际三臂合计 ~¥3 ②**¥0** | ✅ ②已完成并**否证 §1 第 3 条**：可对齐的跨篇数值标签只剩 1 个 → v3 新题型降到两类（见本节末）；✅ ①已完成，附带产出 P3 需要的 single-shot @25 块对照臂 |
 | P1 | `agent.py` 状态机 + trace 落盘（含 `_FIELDS`）+ `read_window`（按 point-id 取，不碰 collection）+ `check_evidence` prompt + 答案轨等长护栏（上面第 2 条的两处）+ parity 矩阵补 CLI 与 `mode` 两维 + v3 multi-hop 黄金集 ~24 条（零 LLM 构造优先，`gen-gold --programmatic-only`） | 无服务 | 0 | 全离线门禁绿；**parity 在 mock 下可跑的前提是注入确定性假 judge**（脚本化判决序列；先例照抄 `tests/test_rewrite_llm.py` 的 `_forbidden`「调用即炸」桩） |
 | P2 | 10 篇示例语料端到端 → 真实库 24 题 small sample，single vs agent | Qdrant + key，且 E2 已放行 | ≈¥1~2 | 只看**失败分类与步数分布**，不报质量结论；两臂各跑一次 `audit-refusals`（风险 1：agent 会把「检索不到」伪装成「文档没记载」，而 `refusal_acc` 只查措辞看不见） |
 | P3 | v3 三臂（single-shot / agent-3step / agent−`read_window`−`check_evidence`）+ 全量 judge + 成本-质量前沿 + 同臂两遍方差 | Qdrant + key | ≈¥5~8 | 主指标是**答案级**（`must_contain` 逐条命中 + 二值「答全/答半」）；`coverage_vs_ceiling` 在多步并集上**不可计算**（每步各有上限，并集 ceiling 取决于去重规则）→ 不得当门槛；Faithfulness 降幅 ≤ **1.9pt** 地板且等长臂必须先存在；聚合题 p95 ≤ 现有 ≤5s SLO 的两倍 |
@@ -1309,8 +1417,13 @@ uv run doc-rag query --kb demo "关于供应商预付款，我们做过哪些决
 uv run doc-rag census-corpus --out data/eval/census.json
 # v3 窗口依赖题（零 LLM；性质复检不过直接 exit 1）
 uv run doc-rag gen-gold --v3 --out data/eval/gold_v3.json
-# E2 上下文预算消融的杠杆（同时压 max_contexts 与 rerank.top_n，见 §5.5）
-uv run doc-rag eval --rewrite --rerank --max-contexts 25
+# E2 三臂（臂 B 是「只动块数预算」那一半杠杆的证伪，见 §5.5）
+uv run doc-rag eval --rewrite --rerank --max-contexts 6                      # 臂 A
+uv run doc-rag eval --rewrite --rerank --max-contexts 25                     # 臂 B：被 top-8 截成 8 块
+uv run doc-rag eval --rewrite --rerank --top-n 25 --max-contexts 25          # 臂 C：真正的 25 块
+# 判据版本统一：离线重判（答案不依赖要点 → 与重跑合成等价，¥0）
+uv run python scripts/rescore_keypoints.py data/eval/results_<A> data/eval/results_<B> data/eval/results_<C>
+uv run doc-rag compare-retrieval --group A=<A>_kc.json --group C=<C>_kc.json --metric keypoint_hit_ratio
 uv run doc-rag eval --kb demo --gold data/eval/gold.json
 uv run doc-rag serve   # FastAPI :8000
 uv run doc-rag check-rewrite   # 查询改写泛化门禁（真实调用，约 ¥0.01）
