@@ -638,6 +638,68 @@ def gen_gold(
     typer.echo(f"共 {meta['count']} 条，题型分布：{meta['type_distribution']}")
 
 
+@app.command("census-corpus")
+def census_corpus(
+    parsed_dir: Annotated[
+        Path | None,
+        typer.Option(help="中间 JSON 目录（默认配置的 paths.parsed）"),
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option(help="普查结果 JSON 输出路径（默认只打印）")
+    ] = None,
+    want_items: Annotated[
+        int, typer.Option(help="判据：这两类新题型各要能凑出几条题")
+    ] = 8,
+) -> None:
+    """v3 出题前的语料普查：表格密度 + 时间线可造性（零 LLM、零 Qdrant）。
+
+    PLAN §5.3 那组「179 个表格 / 固定 512 切下 85 个被切断」只证明了表格存在、
+    分块会切断它们；它**没有**证明能凑出跨篇数值对比题。这条命令量的是后者。
+    """
+    import json
+
+    from doc_rag.eval.census import census, verdict
+
+    root = parsed_dir or Path(load_config()["paths"]["parsed"])
+    report = census(root)
+    call = verdict(report, want_items=want_items)
+    typer.echo(f"普查 {report['parsed_dir']}（{report['docs']} 篇）")
+    typer.echo(
+        f"  表格：{report['tables_total']} 个 / {report['docs_with_tables']} 篇含表格"
+        f"，其中 {report['tables_with_numbers']} 个含数值行；"
+        f"单篇最多 {report['tables_per_doc']['max']} 个"
+    )
+    typer.echo(
+        f"  跨篇数值题原料：同一行标签出现在 ≥2 篇 → "
+        f"{report['cross_doc_labels_raw']} 个（剔掉日期行/序号列后 "
+        f"{report['cross_doc_labels']} 个），覆盖 {report['cross_doc_label_docs']} 篇文档"
+    )
+    typer.echo(
+        f"  时间线题原料：标题带时间点的文档 {report['docs_with_date_in_title']} 篇，"
+        f"同主题多时间点的主题 {report['timeline_topics']} 个"
+    )
+    for kind, ok, detail in (
+        (
+            "跨篇表格数值",
+            call["cross_doc_numeric_viable"],
+            f"{call['cross_doc_labels']} 标签",
+        ),
+        ("时间线推翻", call["timeline_viable"], f"{call['timeline_topics']} 主题"),
+    ):
+        typer.echo(
+            f"  [{kind}] {'可出' if ok else '凑不出'}（判据 ≥{want_items} 条；{detail}）"
+        )
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(
+                {"report": report, "verdict": call}, ensure_ascii=False, indent=2
+            ),
+            encoding="utf-8",
+        )
+        typer.echo(f"  已写入 {out}")
+
+
 @app.command("eval")
 def evaluate(
     gold: Annotated[Path | None, typer.Option(help="黄金集 JSON 路径")] = None,

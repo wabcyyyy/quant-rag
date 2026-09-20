@@ -1172,7 +1172,7 @@ parity 扩展这四件是两条路共用的，不会白。
 | 期 | 内容 | 依赖 | 花费 | 不达标就不进下一期 |
 |---|---|---|---|---|
 | ~~P0~~ | F1/F2/F3 拍板 + 本节 | — | 0 | ✅ 2026-09-20 |
-| P0.5 | E2 上下文预算消融 · 表格密度普查 | Qdrant + key | ≈¥2~4 | E2 判「多喂块 → 答案要点命中」升不升；普查给出 179 个表格的分布与可出题数 |
+| P0.5 | ① E2 上下文预算消融（**未跑，仍是 P2/P3 的放行闸**）· ② 表格密度普查 | ①Qdrant+key ②无 | ①≈¥2~4 ②**¥0** | ✅ ②已完成并**否证 §1 第 3 条**：可对齐的跨篇数值标签只剩 1 个 → v3 新题型降到两类（见本节末）；①判「多喂块 → 答案要点命中」升不升 |
 | P1 | `agent.py` 状态机 + trace 落盘（含 `_FIELDS`）+ `read_window`（按 point-id 取，不碰 collection）+ `check_evidence` prompt + 答案轨等长护栏（上面第 2 条的两处）+ parity 矩阵补 CLI 与 `mode` 两维 + v3 multi-hop 黄金集 ~24 条（零 LLM 构造优先，`gen-gold --programmatic-only`） | 无服务 | 0 | 全离线门禁绿；**parity 在 mock 下可跑的前提是注入确定性假 judge**（脚本化判决序列；先例照抄 `tests/test_rewrite_llm.py` 的 `_forbidden`「调用即炸」桩） |
 | P2 | 10 篇示例语料端到端 → 真实库 24 题 small sample，single vs agent | Qdrant + key，且 E2 已放行 | ≈¥1~2 | 只看**失败分类与步数分布**，不报质量结论；两臂各跑一次 `audit-refusals`（风险 1：agent 会把「检索不到」伪装成「文档没记载」，而 `refusal_acc` 只查措辞看不见） |
 | P3 | v3 三臂（single-shot / agent-3step / agent−`read_window`−`check_evidence`）+ 全量 judge + 成本-质量前沿 + 同臂两遍方差 | Qdrant + key | ≈¥5~8 | 主指标是**答案级**（`must_contain` 逐条命中 + 二值「答全/答半」）；`coverage_vs_ceiling` 在多步并集上**不可计算**（每步各有上限，并集 ceiling 取决于去重规则）→ 不得当门槛；Faithfulness 降幅 ≤ **1.9pt** 地板且等长臂必须先存在；聚合题 p95 ≤ 现有 ≤5s SLO 的两倍 |
@@ -1205,6 +1205,21 @@ trace 现在真的能落盘：`Result.trace` → `/query` 响应、SSE 的 `done
 `meta.agent.type_matches_gold` 事后度量。② agent 臂的上下文预算**替换**单发口径
 `min(max_contexts, rerank.top_n)`，因为砍回 6 块就砍掉了这层的理由；代价是答案轨必须先有
 同块数对照臂。
+
+**P0.5 的第②项（表格密度普查）已跑完，成本 ¥0，结论是否证**：`doc-rag census-corpus`
+只读 `data/parsed`，不碰 Qdrant 也不碰 LLM（原判在 P0.5 的 ¥2~4 里，那笔钱其实全是 E2 的）。
+实测 1127 篇里 **106 篇含表格、共 179 个表格**（与 §5.3 那组 179 独立对上了），
+但**含数值行的只有 29 个**；把「同一行标签出现在 ≥2 篇」当作跨篇数值对比题的原料来数，
+raw 13 个标签里 8 个是日期行、4 个是序号列，**剔掉之后只剩 1 个**（「入职日期」，覆盖 2 篇）。
+→ **§1 第 3 条动机（表格数值题=出题+分块）在这份语料里是空的**，v3 的新题型从三类降到两类：
+**时间线推翻**（普查到 14 个「同主题 ≥2 时间点」的候选，够出 ≥8 条）与**窗口依赖**。
+`tables_per_doc.max=9`、45 篇有 ≥2 张表，所以「表格被切断」这件事本身仍然成立——它是
+§5.1 分块的既证结论，只是**不能**再拿它当 agent 的出题动机。
+
+**时间线题型在规则 3 不放宽下的 gold 口径（2026-09-20 定）**：gold 只取**后一次**决议，
+`must_contain` 落在后来那篇的关键句，「推翻」只体现在问题的措辞里。这样它是检索挑战
+（要把后一篇顶到前列，而同类文档的措辞几乎一样），合成口径逐字不动；
+「A 后来推翻了 B」这种合并陈述仍然留给 P4。
 
 **P1-e 同日完成：答案轨的等长护栏已经存在。** RAGAS 轨的 `per_item` 现在带 `n_contexts`
 （`eval/runner._run_ragas`），`compare()` 的 RAGAS 臂接上了既有 aux 通路，两臂块数不等时
@@ -1258,6 +1273,8 @@ uv run doc-rag ingest data/raw --kb demo
 uv run doc-rag ingest data/raw --kb demo --prune        # 反向对账：只报告幽灵块
 uv run doc-rag ingest data/raw --kb demo --prune --yes  # 真清理（删过就要重跑检索基线）
 uv run doc-rag query --kb demo "关于供应商预付款，我们做过哪些决定？"
+# 语料普查（v3 出题前置，¥0：只读 data/parsed，不碰 Qdrant 与 LLM）
+uv run doc-rag census-corpus --out data/eval/census.json
 uv run doc-rag eval --kb demo --gold data/eval/gold.json
 uv run doc-rag serve   # FastAPI :8000
 uv run doc-rag check-rewrite   # 查询改写泛化门禁（真实调用，约 ¥0.01）
