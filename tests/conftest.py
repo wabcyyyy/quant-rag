@@ -11,9 +11,16 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import Mock
 
 import pytest
+
+# ragas 在 import 时就构造遥测 batcher（`_analytics.py` 模块级），此后每次判分都可能
+# 向 t.explodinggradients.com POST。离线门禁不该有出网行为——本机装了 `--extra eval`
+# 时那三个判分测试是真跑的。必须在 ragas 被导入之前设好，conftest 就是最早的位置。
+# 用 setdefault：要观察 ragas 自身行为的人可以 externally 设成 false。
+os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 
 class FakeQdrant:
