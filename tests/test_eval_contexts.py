@@ -6,6 +6,8 @@ Orchestrator，测试不能再测一份复制品）。
 
 from __future__ import annotations
 
+import json
+
 from doc_rag.eval.runner import (
     _judge_contexts,
     _legacy_contexts,
@@ -84,3 +86,56 @@ def test_sample_rows_no_op_when_sample_exceeds_size():
     rows = [{"id": f"q{i}"} for i in range(5)]
     assert _sample_rows(rows, 0) == rows
     assert _sample_rows(rows, 99) == rows
+
+
+# ── E2 的杠杆：`eval --max-contexts` ────────────────────────────────────
+
+
+def _capture_cfg(monkeypatch, tmp_path, args):
+    """跑一次 CLI，停在 `runner.evaluate` 门口，把传进去的 cfg 抓回来。
+
+    不真跑评估：E2 的两臂只要证明「预算确实被改了」。min(max_contexts, rerank.top_n)
+    的生效口径在 test_orchestrator_parity 里已经钉着，这里不重复钉一遍。
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    from doc_rag import cli
+    from doc_rag.eval import runner
+
+    seen: dict = {}
+
+    def _stop(*a, **kw):
+        seen.update(kw)
+        raise typer.Exit(0)
+
+    # eval 入口先校验黄金集存在，所以给一个真的空文件——不是为了跑，是为了别半路退出
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"items": []}), encoding="utf-8")
+    cfg = {
+        "retrieval": {"max_contexts": 10},
+        "rerank": {"enabled": True, "top_n": 6},
+        "eval": {"gold_file": str(gold), "ragas_sample": 0},
+        "paths": {"eval": str(tmp_path)},
+    }
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(runner, "evaluate", _stop)
+    res = CliRunner().invoke(cli.app, args)
+    assert res.exit_code == 0, res.output
+    return cfg, seen
+
+
+def test_max_contexts_flag_presses_both_knobs(monkeypatch, tmp_path):
+    """只动 retrieval.max_contexts 的杠杆是假杠杆：块数是两个键的 min。"""
+    cfg, seen = _capture_cfg(monkeypatch, tmp_path, ["eval", "--max-contexts", "25"])
+    assert seen["cfg"]["retrieval"]["max_contexts"] == 25
+    assert seen["cfg"]["rerank"]["top_n"] == 25
+    # 改的是 load_config 返回的那一份；configs/default.yaml 不许被写
+    assert cfg["retrieval"]["max_contexts"] == 25
+
+
+def test_no_flag_leaves_the_budget_alone(monkeypatch, tmp_path):
+    """不传时一个键都不动——否则 E2 的对照臂不知道自己在跟谁比。"""
+    _, seen = _capture_cfg(monkeypatch, tmp_path, ["eval"])
+    assert seen["cfg"]["retrieval"]["max_contexts"] == 10
+    assert seen["cfg"]["rerank"]["top_n"] == 6

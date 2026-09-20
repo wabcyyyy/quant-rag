@@ -815,6 +815,13 @@ def evaluate(
         typer.Option(help="判分端点；指向 embedding 那家时 key 自动复用"),
     ] = "",
     judge_api_key: Annotated[str, typer.Option(help="判分端点的 key")] = "",
+    max_contexts: Annotated[
+        int | None,
+        typer.Option(
+            help="上下文预算覆盖（E2 消融的杠杆）。同时压 `retrieval.max_contexts` 与 "
+            "`rerank.top_n`——进 LLM 的块数是这两者的 min，只改一个不动作。"
+        ),
+    ] = None,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -823,6 +830,17 @@ def evaluate(
     from doc_rag.generate import prompts
 
     cfg = load_config()
+
+    if max_contexts:
+        # E2（上下文预算消融）的杠杆。进 LLM 的块数 = min(max_contexts, rerank.top_n)，
+        # 两个键必须一起压，否则预算纹丝不动却看起来改了。生效值由结果文件的
+        # meta.context_budget 自证：臂与臂的差要能追溯到配置，不是追溯到谁记没记住。
+        cfg.setdefault("retrieval", {})["max_contexts"] = max_contexts
+        cfg.setdefault("rerank", {})["top_n"] = max_contexts
+        typer.echo(
+            f"上下文预算已覆盖为 {max_contexts} 块"
+            "（retrieval.max_contexts 与 rerank.top_n 同步）\n"
+        )
 
     if prompt_version:
         if prompt_version not in prompts.ANSWER_PROMPTS:

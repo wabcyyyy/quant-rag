@@ -1135,6 +1135,19 @@ parity 扩展这四件是两条路共用的，不会白。
 表格密度普查同属 P0.5，它决定草案 §1 第 3 条（全库 179 个表格、固定 512 切下 85 个被切断或跨块、
 而黄金集里表格数值题 0 条）到底能不能凑出 ≥8 条跨篇数值对比题 —— 凑不出来那条动机就是空的。
 
+**E2 怎么跑：三条命令，不需要新代码。** 它的杠杆是 `eval --max-contexts N`；这个开关
+**同时**压 `retrieval.max_contexts` 与 `rerank.top_n`，因为进 LLM 的块数是两者的 min
+—— 只压一个是假杠杆，两臂其实是同一份预算（`tests/test_eval_contexts.py` 锁住了这条）。
+
+```bash
+uv run doc-rag eval --rewrite --rerank --max-contexts 6    # 臂 A：现产品口径（6 块）
+uv run doc-rag eval --rewrite --rerank --max-contexts 25   # 臂 B：多喂块
+uv run doc-rag compare-ragas <A 的结果文件> <B 的结果文件>  # 文件名带时间戳，CLI 会打印
+```
+判读只看**答案级**：`contains_acc`（must_contain 逐条命中）与分题型的要点命中；
+Faithfulness 那一列会被刚补上的等长告警标成伪影 —— 这是预期的，两臂块数本来就不同，
+它正是那条护栏该说话的地方。结果文件的 `meta.context_budget` 会记下两臂各自的生效预算。
+
 **草案转入本节时的代码复核改掉了 5 处**（草案文字与仓库不符，一律以下面这版为准）：
 
 1. 草案 §4 的「五入口一致性」**不成立**：parity helper 原名为 `_drive_all_four`，改正前覆盖 `/query`、
@@ -1296,6 +1309,8 @@ uv run doc-rag query --kb demo "关于供应商预付款，我们做过哪些决
 uv run doc-rag census-corpus --out data/eval/census.json
 # v3 窗口依赖题（零 LLM；性质复检不过直接 exit 1）
 uv run doc-rag gen-gold --v3 --out data/eval/gold_v3.json
+# E2 上下文预算消融的杠杆（同时压 max_contexts 与 rerank.top_n，见 §5.5）
+uv run doc-rag eval --rewrite --rerank --max-contexts 25
 uv run doc-rag eval --kb demo --gold data/eval/gold.json
 uv run doc-rag serve   # FastAPI :8000
 uv run doc-rag check-rewrite   # 查询改写泛化门禁（真实调用，约 ¥0.01）
