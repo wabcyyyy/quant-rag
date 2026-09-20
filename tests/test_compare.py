@@ -16,13 +16,19 @@ from doc_rag.eval.compare import (
 
 
 def _write(
-    tmp_path, name: str, scores: dict[str, float], types: dict[str, str] | None = None
+    tmp_path,
+    name: str,
+    scores: dict[str, float],
+    types: dict[str, str] | None = None,
+    ctx: dict[str, int] | None = None,
 ):
     types = types or {}
-    per_item = [
-        {"id": i, "type": types.get(i, "fact"), "faithfulness": s}
-        for i, s in scores.items()
-    ]
+    per_item = []
+    for i, s in scores.items():
+        entry: dict = {"id": i, "type": types.get(i, "fact"), "faithfulness": s}
+        if ctx:
+            entry["n_contexts"] = ctx[i]
+        per_item.append(entry)
     payload = {
         "meta": {"collection": "c", "retrieval": "r"},
         "summary": {
@@ -251,6 +257,75 @@ def test_identical_config_reruns_have_zero_metric_noise(tmp_path):
     text = format_report(rep)
     assert text.startswith("== 检索 配对判读")
     assert "检索重跑噪声地板" in text
+
+
+# ── 答案轨的等长护栏（PLAN §5.5 门槛 2） ────────────────────────────────
+
+
+def test_ragas_track_flags_unequal_context_counts(tmp_path):
+    """两臂块数不等时必须报出来：agent 臂必然送更多块，而 faithfulness 随块数走高。
+
+    没有这条告警，「agent 的 faithfulness 更高」就可能是构造出来的偏差，
+    而且偏差量级正好在 judge 自身方差（≥1.9pt）那一档。
+    """
+    a = _write(
+        tmp_path,
+        "single.json",
+        {f"q{i}": 0.90 for i in range(4)},
+        ctx={f"q{i}": 6 for i in range(4)},
+    )
+    b = _write(
+        tmp_path,
+        "agent.json",
+        {f"q{i}": 0.95 for i in range(4)},
+        ctx={f"q{i}": 12 for i in range(4)},
+    )
+    rep = compare([{"label": "单发", "files": [a]}, {"label": "agent", "files": [b]}])
+    warns = rep["paired"][0]["warnings"]
+    hit = [w for w in warns if "进 LLM 的上下文块不等长" in w]
+    assert hit, warns
+    # 措辞要分轨：答案轨的后果是「偏向块数多的一臂」，不是检索轨的分母问题
+    assert "faithfulness" in hit[0] and "偏向块数多的一臂" in hit[0]
+    assert "nDCG" not in hit[0]
+
+
+def test_ragas_track_with_equal_context_counts_has_no_length_warning(tmp_path):
+    """同块数对照臂存在时不该报警——这条护栏的意义就是逼着那条臂存在。"""
+    a = _write(
+        tmp_path,
+        "a.json",
+        {f"q{i}": 0.90 for i in range(4)},
+        ctx={f"q{i}": 8 for i in range(4)},
+    )
+    b = _write(
+        tmp_path,
+        "b.json",
+        {f"q{i}": 0.95 for i in range(4)},
+        ctx={f"q{i}": 8 for i in range(4)},
+    )
+    rep = compare([{"label": "A", "files": [a]}, {"label": "B", "files": [b]}])
+    assert rep["paired"][0]["warnings"] == []
+
+
+def test_legacy_ragas_without_n_contexts_stays_silent(tmp_path):
+    """旧产物没这个键 → 护栏不置可否：既不假装等长，也不凭空报错。"""
+    a = _write(tmp_path, "a.json", {f"q{i}": 0.9 for i in range(4)})
+    b = _write(tmp_path, "b.json", {f"q{i}": 0.8 for i in range(4)})
+    rep = compare([{"label": "A", "files": [a]}, {"label": "B", "files": [b]}])
+    assert rep["paired"][0]["warnings"] == []
+    assert load_scores(a)["aux"] == {}
+
+
+def test_ragas_aux_records_per_item_context_counts(tmp_path):
+    """aux 是护栏的输入：逐条块数要能读出来，均值才有意义。"""
+    path = _write(
+        tmp_path,
+        "a.json",
+        {f"q{i}": 0.9 for i in range(3)},
+        ctx={"q0": 6, "q1": 7, "q2": 6},
+    )
+    aux = load_scores(path)["aux"]
+    assert aux == {"q0": {"ctx_len": 6}, "q1": {"ctx_len": 7}, "q2": {"ctx_len": 6}}
 
 
 def test_coverage_gain_that_is_purely_list_length(tmp_path):

@@ -157,13 +157,20 @@ def load_scores(path: str | Path, metric: str | None = None) -> dict:
         for row in summary["per_item"]
         if row.get(chosen) is not None
     }
+    # 答案轨的等长护栏：块数来自 per_item 的 n_contexts。旧产物没这个键 → aux 为空，
+    # 护栏退化成「不置可否」而不是硬判，与改动前一致（但新产物不会再漏掉这个偏差）。
+    aux = {
+        row["id"]: {"ctx_len": row.get("n_contexts")}
+        for row in summary["per_item"]
+        if row.get("n_contexts") is not None
+    }
     return {
         "path": p,
         "metric": chosen,
         "track": "ragas",
         "items": items,
         "types": {row["id"]: row.get("type") for row in summary["per_item"]},
-        "aux": {},
+        "aux": aux,
         "meta": data.get("meta") or {},
         "summary": summary,
     }
@@ -257,19 +264,34 @@ def _aux_mean(aux: dict, ids: list[str], key: str) -> float | None:
     return _mean([float(v) for v in vals])
 
 
-def _length_warnings(base: dict, other: dict, common: list[str]) -> list[str]:
+def _length_warnings(
+    base: dict, other: dict, common: list[str], track: str = "retrieval"
+) -> list[str]:
     """两臂清单长度 / 上下文块数 / 覆盖率上限不等 → 差值不能整体当质量差读。"""
     warns: list[str] = []
-    for key, label in (
-        ("list_len", "检索清单"),
-        ("ctx_len", "进 LLM 的上下文块"),
+    # 两条轨上「不等长」的后果不是同一件事，措辞必须分开：检索轨是指标分母被长度
+    # 改变；答案轨是 faithfulness 天然偏向块数多的一臂（可验证的陈述更多、每条更
+    # 容易找到依据）。后者正是 agent 臂必然踩到的那个坑。
+    ctx_tail = (
+        "→ faithfulness 随上下文变长单调走高，这个差偏向块数多的一臂；"
+        "结论要等同块数对照臂（PLAN §5.5 门槛 2）"
+        if track == "ragas"
+        else "→ hit/nDCG/覆盖率的差部分是长度的函数，不是排序质量"
+    )
+    for key, label, tail in (
+        (
+            "list_len",
+            "检索清单",
+            "→ hit/nDCG/覆盖率的差部分是长度的函数，不是排序质量",
+        ),
+        ("ctx_len", "进 LLM 的上下文块", ctx_tail),
     ):
         a = _aux_mean(base["aux"], common, key)
         b = _aux_mean(other["aux"], common, key)
         if a is not None and b is not None and abs(a - b) > 1e-9:
             warns.append(
-                f"{label}不等长（{base['label']} {a:.2f} vs {other['label']} {b:.2f} 格）"
-                "→ hit/nDCG/覆盖率的差部分是长度的函数，不是排序质量"
+                f"{label}不等长（{base['label']} {a:.2f} vs {other['label']} "
+                f"{b:.2f} 格）{tail}"
             )
     ca = _aux_mean(base["aux"], common, "ceiling")
     cb = _aux_mean(other["aux"], common, "ceiling")
@@ -348,7 +370,7 @@ def compare(
                 "losses": losses,
                 "ties": len(diffs) - wins - losses,
                 "sign_test_p": _sign_test_p(wins, losses),
-                "warnings": _length_warnings(base, g, common),
+                "warnings": _length_warnings(base, g, common, track=probe["track"]),
                 "largest_drops": sorted(
                     ((i, round(d, 4)) for i, d in zip(common, diffs)),
                     key=lambda t: t[1],

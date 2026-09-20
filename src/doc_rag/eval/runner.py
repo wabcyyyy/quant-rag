@@ -943,6 +943,11 @@ def _run_ragas(
         per_item = []
         for idx, row in enumerate(rows):
             entry = {"id": row["id"], "type": row["type"]}
+            # 每条判分带上的上下文块数：faithfulness 随上下文变长单调走高（可验证的
+            # 陈述更多、每条更容易找到依据），所以两臂块数不等时这个差**偏向块数多的
+            # 一臂**。不带这个数，compare 的等长护栏在答案轨上就是瞎的（PLAN §5.5 门槛 2）。
+            contexts = row.get("retrieved_contexts") or []
+            entry["n_contexts"] = len(contexts)
             for m in metrics:
                 if m.name in df.columns and idx < len(df):
                     val = df[m.name].iloc[idx]
