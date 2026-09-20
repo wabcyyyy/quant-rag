@@ -14,6 +14,7 @@ import json
 import random
 import re
 from collections import Counter
+from itertools import pairwise
 from pathlib import Path
 
 from ..generate import llm
@@ -582,6 +583,215 @@ def generate(
             "decision 增加程序化构造（决议区提取，零 LLM）；LLM 生成题原样保留"
         )
     payload = {"meta": meta_out, "items": [i.model_dump() for i in final]}
+    out_file.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return meta_out
+
+
+# ── v3：窗口依赖题（PLAN §5.5 P1-g） ─────────────────────────────────────
+#
+# 为什么 v3 只剩这一类新增题：另两类的前置普查（`doc-rag census-corpus`）——
+#   · 跨篇表格数值：179 个表格里含数值行的只有 29 个，可对齐的跨篇标签剔掉日期行与
+#     序号列后只剩 1 个 → 凑不出题，动机被否证。
+#   · 时间线推翻：14 个「同主题多时间点」候选是有的，但它的 gold 只有**一篇**文档，
+#     不满足 v3 的入场券「按构造保证单条清单必败」——那是 recency/排序问题（§1 第 4 条，
+#     不需要 agent），所以移出去，不算 v3 的多跳题。
+# 窗口依赖题满足入场券，而且是**同篇两块**：值只在 B 块、说的是哪件事只在 A 块。
+# 任何只装单块的清单都答不全它，而 `read_window` 恰好补的就是邻居块。
+
+
+_V3_TITLE_SPLIT = re.compile(
+    r"[_\-/（）()、,，:：]|议题\d+|20\d{2}(?:年第\d{1,2}周|年\d{1,2}月|年)"
+)
+# 带单位的数才当「值」：裸年份、页码、序号会在两块里都出现，撑不起跨块依赖
+_V3_VALUE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:元|万元|万|%|人|票|天|次)")
+_V3_CUE = re.compile(
+    r"通过|否决|同意|决定|暂定|定为|取消|采用|选用|维持|保留|试行|改为|合适|建议|比例"
+)
+# 模板词当主语出的题不是题：实测第一批 7 条里有 3 条主语是「会议纪要2/会议纪要3/办公会」
+# ——它们在问句里不指认任何东西，人不会这么问，答对也证明不了窗口依赖被解决。
+_V3_TEMPLATE_SUBJECT = re.compile(
+    r"^(会议纪要?\d*|会议记录\d*|周会|月会|办公会|例会|议题\d*|投票\d*|研讨\d*"
+    r"|记录|笔记|模板|草稿|报告$|.*职能$)"
+)
+
+
+def _title_subjects(title: str) -> list[str]:
+    """标题里的候选主语（≥3 字，长的优先——「贴吧项目报价单」比「项目」更可指认）。"""
+    words = {
+        p.strip() for p in _V3_TITLE_SPLIT.split(title or "") if len(p.strip()) >= 3
+    }
+    return sorted(words, key=len, reverse=True)
+
+
+def _load_intermediates(parsed_dir: Path) -> list:
+    """v3 要按**生产分块**看语料，所以这里不走 `_load_docs`（它把块拍平成一段正文）。"""
+    from ..ingest.chunker import chunk_document
+    from ..ingest.schema import IntermediateDoc
+
+    out = []
+    for path in sorted(parsed_dir.glob("*.json")):
+        if path.name == "profile.json":
+            continue
+        try:
+            doc = IntermediateDoc.model_validate(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        except Exception:  # noqa: BLE001, S112  # 单份坏导出不该中断整轮出题
+            continue
+        chunks = chunk_document(doc)
+        if len(chunks) >= 2:
+            out.append((doc, chunks))
+    return out
+
+
+def _window_pairs(doc, chunks) -> list[dict]:
+    """找「主语只在 A、值只在 B」的相邻块对。
+
+    判据为什么不是「句子被块边界切断」：`chunk_document` 是结构感知分块，只有单句超过
+    MAX_CHARS 才硬切，实测这种切断在这份语料里几乎没有可出题的例子。真实存在的形状是
+    决议句/数值落在 B 块，而它说的是哪件事只在 A 块——B 单独进 LLM 时它只知道
+    「15%比较合适」，不知道是谁的 15%。
+    """
+    subjects = _title_subjects(doc.meta.title or "")
+    if not subjects:
+        return []
+    pairs = []
+    for a, b in pairwise(chunks):
+        a_text = _clean_text(a.text)
+        b_text = _clean_text(b.text)
+        m = _V3_VALUE.search(b_text)
+        if not m:
+            continue  # 值必须在 B
+        value = re.sub(r"\s+", "", m.group(0))
+        if value in re.sub(r"\s+", "", a_text):
+            continue  # A 里也有这个值 → 不是「各记一半」
+        if any(s in b_text for s in subjects):
+            continue  # B 自带主语 → 单块就能答
+        subject = next(
+            (s for s in subjects if s in a_text and not _V3_TEMPLATE_SUBJECT.match(s)),
+            None,
+        )
+        if not subject:
+            continue  # 主语必须在 A 的**正文**里（section_path 不进 prompt），且不能是模板词
+        pairs.append(
+            {
+                "a": a,
+                "b": b,
+                "subject": subject,
+                "value": value,
+                "cue": bool(_V3_CUE.search(b_text)),
+                "b_quote": b_text[:160].replace("\n", " "),
+            }
+        )
+    return pairs
+
+
+def _window_items(
+    parsed_dir: Path, limit: int = 12, stats: dict | None = None
+) -> list[GoldItem]:
+    """窗口依赖题：只收**带决议线索词**的邻块对——纯数值的候选实测多是顺带出现的数。
+
+    门槛不是洁癖：一道「关于 X，数字是多少」如果 X 是模板词、值是句里捎带的
+    「2-3 天」，那它答对答错都不说明窗口机制有没有用，反而会把 v3 的平均值稀释成噪声。
+    """
+    all_pairs = []
+    for doc, chunks in _load_intermediates(parsed_dir):
+        for pair in _window_pairs(doc, chunks):
+            all_pairs.append((doc, pair))
+    cued = [(d, p) for d, p in all_pairs if p["cue"]]
+    if stats is not None:
+        stats["candidates_total"] = len(all_pairs)
+        stats["candidates_with_cue"] = len(cued)
+        stats["dropped_for_quality"] = len(all_pairs) - len(cued)
+    # 同档内按 doc_id 稳定排序：同一份语料重跑要逐字得到同一批题
+    cued.sort(key=lambda dp: (dp[0].meta.doc_id, dp[1]["a"].chunk_id))
+    items = []
+    for doc, p in cued[:limit]:
+        items.append(
+            GoldItem(
+                id="",
+                type="window",
+                question=f"关于「{p['subject']}」，最后定下来的具体数字是多少？",
+                expected_answer=(
+                    f"{p['value']}（原句在 {p['b'].chunk_id}：{p['b_quote']}）"
+                ),
+                must_contain=[p["value"]],
+                source_doc_ids=[doc.meta.doc_id],
+                refusable=False,
+                source_title=doc.meta.title,
+                origin="programmatic_window",
+                required_chunk_ids=[p["a"].chunk_id, p["b"].chunk_id],
+            )
+        )
+    return items
+
+
+def v3_property_violations(parsed_dir: Path, items: list[GoldItem]) -> list[str]:
+    """复检这批题还满不满足「单条清单必败」：值不在 A、主语不在 B、两块同篇相邻。
+
+    出题时成立不等于重新生成分块策略后还成立。分块一改，这套题的性质会悄悄失效，
+    而文档级覆盖率根本看不出来（gold 只有 1 篇文档）——所以把它做成可跑的复检。
+    """
+    by_doc: dict[str, dict] = {}
+    for doc, chunks in _load_intermediates(parsed_dir):
+        by_doc[doc.meta.doc_id] = {c.chunk_id: c for c in chunks}
+    bad: list[str] = []
+    for item in items:
+        if item.type != "window":
+            continue
+        ids = item.required_chunk_ids
+        if len(ids) != 2 or len(item.source_doc_ids) != 1:
+            bad.append(f"{item.id}: required_chunk_ids 不是同篇两块")
+            continue
+        chunks = by_doc.get(item.source_doc_ids[0])
+        if not chunks or any(i not in chunks for i in ids):
+            bad.append(f"{item.id}: 块已经不在当前分块里（分块策略变了？）")
+            continue
+        a_text = _clean_text(chunks[ids[0]].text)
+        b_text = _clean_text(chunks[ids[1]].text)
+        subject = re.search(r"「(.+?)」", item.question)
+        if not subject or subject.group(1) not in a_text:
+            bad.append(f"{item.id}: 主语不在 A 块正文里")
+        elif any(kw in b_text for kw in (subject.group(1),)):
+            bad.append(f"{item.id}: 主语也出现在 B 块，单块就能答")
+        missing = [
+            kw for kw in item.must_contain if kw not in re.sub(r"\s+", "", b_text)
+        ]
+        if missing:
+            bad.append(f"{item.id}: 值不在 B 块（{missing}）")
+        if any(kw in re.sub(r"\s+", "", a_text) for kw in item.must_contain):
+            bad.append(f"{item.id}: 值同时在 A 块，不再是各记一半")
+    return bad
+
+
+def generate_v3(parsed_dir: Path, out_file: Path, limit: int = 12) -> dict:
+    """v3（multi-hop·窗口依赖）：独立文件、零 LLM、不与现有 72 条混口径。"""
+    stats: dict = {}
+    items = _window_items(parsed_dir, limit=limit, stats=stats)
+    for n, item in enumerate(items, start=1):
+        item.id = f"w{n:03d}"
+    violations = v3_property_violations(parsed_dir, items)
+    meta_out = {
+        "gold_version": "v3-draft",
+        "corpus_dir": str(parsed_dir),
+        "count": len(items),
+        "type_distribution": dict(Counter(i.type for i in items)),
+        # 性质复检结果必须随文件落盘：0 才是可用的 v3
+        "property_violations": violations,
+        # 原料数量随文件落盘：这批题只有个位数时，v3 撑不起「三臂消融」的统计功效，
+        # 这个事实必须和题面在一起，不能只留在某次对话里。
+        **stats,
+        "bar_met": len(items) >= 8,
+        "construction_note": (
+            "窗口依赖题：主语只在 A 块、带单位的数值只在 B 块（同篇相邻）。"
+            "单条清单只装块，不含邻居块的清单按构造答不全。"
+            "跨篇表格数值类已被 census-corpus 否证；时间线推翻类不满足按构造必败，移出 v3。"
+        ),
+    }
+    payload = {"meta": meta_out, "items": [i.model_dump() for i in items]}
+    out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )

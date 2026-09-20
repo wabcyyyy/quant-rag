@@ -1220,6 +1220,8 @@ raw 13 个标签里 8 个是日期行、4 个是序号列，**剔掉之后只剩
 `must_contain` 落在后来那篇的关键句，「推翻」只体现在问题的措辞里。这样它是检索挑战
 （要把后一篇顶到前列，而同类文档的措辞几乎一样），合成口径逐字不动；
 「A 后来推翻了 B」这种合并陈述仍然留给 P4。
+（同日补充：这条口径**继续有效**，但这类题不属于 v3 multi-hop——它的 gold 只有 1 篇文档，
+不满足「按构造保证单条清单必败」，归到 recency/时效那条线，见本节末 P1-g。）
 
 **P1-e 同日完成：答案轨的等长护栏已经存在。** RAGAS 轨的 `per_item` 现在带 `n_contexts`
 （`eval/runner._run_ragas`），`compare()` 的 RAGAS 臂接上了既有 aux 通路，两臂块数不等时
@@ -1234,6 +1236,23 @@ raw 13 个标签里 8 个是日期行、4 个是序号列，**剔掉之后只剩
 ——判定本身不可复现，不脚本化就没有「相等」可言。trace 的采集点放在 `run_agent` 那一层
 而不是各入口的返回值上：这样「某条入口悄悄绕过 policy 层」会直接表现为 traces 少一份
 （突变验过：给 CLI 塞一个 `mode="single"` → 报 `5 != 6`）。
+
+**P1-g（v3 出题）跑完，结论是「现有语料里挖不出来」。** `doc-rag gen-gold --v3` 实现了唯一还
+站得住的新题型——**窗口依赖题**：值只在 B 块、说的是哪件事只在 A 块（同篇相邻），所以
+**只装单块的清单按构造答不全**，而 `read_window` 补的正是邻居块。真实语料跑出来：候选邻块对
+5 个，带决议线索词且主语不是模板词的 **3 个 → 只出到 3 条题**（判据 ≥8）。性质复检
+`v3_property_violations` 随文件落盘并通过，而且它不是恒真的：把 `must_contain` 换成 A 块里
+也有的词、或把 `required_chunk_ids` 换成当前分块里不存在的块，它都会报。
+
+三类新题型的下场都由这两次 ¥0 测量定了：跨篇表格数值**被否证**；时间线推翻**不满足入场券**
+（它的 gold 只有 1 篇文档，考的是 recency/排序，也就是 §1 第 4 条那条不需要 agent 的线 ——
+上面定的「gold 只取后一次决议」口径仍然有效，但它属于 recency 题型，不属于 v3 multi-hop）；
+窗口依赖**只有 3 条原料**。v2 里确有 19 条「gold 文档数 > 检索预算」的题（最多 56 篇：
+`cross_doc` 8 + `time_filter` 11），那是并集天然能发力的题面，但它们不在新预算口径下，
+按本节开头的口径规则只能并列、不能与 v3 混用。→ **v3 要成 24 条只有一条路：造料**
+（扩 `scripts/make_sample_corpus.py` 生成窗口依赖形状，或走 LLM 出题 + 逐字 grounding 校验）。
+在 E2 之前做这件事，等于把钱花在一个还没被证明会赢的方向上 —— 所以 P1 到此为止，
+**agent 一期现在只有机制与护栏，没有可量收益的题面**。
 
 ## 6. 交付物与复现命令
 
@@ -1275,6 +1294,8 @@ uv run doc-rag ingest data/raw --kb demo --prune --yes  # 真清理（删过就�
 uv run doc-rag query --kb demo "关于供应商预付款，我们做过哪些决定？"
 # 语料普查（v3 出题前置，¥0：只读 data/parsed，不碰 Qdrant 与 LLM）
 uv run doc-rag census-corpus --out data/eval/census.json
+# v3 窗口依赖题（零 LLM；性质复检不过直接 exit 1）
+uv run doc-rag gen-gold --v3 --out data/eval/gold_v3.json
 uv run doc-rag eval --kb demo --gold data/eval/gold.json
 uv run doc-rag serve   # FastAPI :8000
 uv run doc-rag check-rewrite   # 查询改写泛化门禁（真实调用，约 ¥0.01）

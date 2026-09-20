@@ -621,15 +621,51 @@ def gen_gold(
     programmatic_only: Annotated[
         bool, typer.Option(help="只重算程序化题型（保留已有 LLM 题，零 LLM 成本）")
     ] = False,
+    v3: Annotated[
+        bool,
+        typer.Option(
+            help="生成 v3（multi-hop·窗口依赖）独立文件：零 LLM，不与现有 72 条混口径。"
+            "必须配 --out 指一个新文件。"
+        ),
+    ] = False,
+    limit: Annotated[
+        int, typer.Option(help="v3 最多出几条（原料由 census/probe 判据决定）")
+    ] = 12,
 ) -> None:
     """生成黄金评估集（LLM 生成 + 程序化构造，构造过程可复现）。"""
-    from doc_rag.eval.goldgen import generate
+    from doc_rag.eval.goldgen import generate, generate_v3
 
     cfg = load_config()
     parsed = Path(cfg["paths"]["parsed"])
     if not parsed.exists():
         typer.echo("先跑 doc-rag ingest 生成解析产物")
         raise typer.Exit(1)
+    if v3:
+        out_file = out or Path("data/eval/gold_v3.json")
+        meta = generate_v3(parsed, out_file, limit=limit)
+        typer.echo(f"v3 已生成：{out_file}")
+        typer.echo(
+            f"共 {meta['count']} 条，题型分布：{meta['type_distribution']}"
+            f"（corpus={meta['corpus_dir']}）"
+        )
+        typer.echo(
+            f"    原料：候选邻块对 {meta['candidates_total']} 个，"
+            f"其中带决议线索词的 {meta['candidates_with_cue']} 个"
+            f"（为质量丢掉 {meta['dropped_for_quality']} 个）"
+        )
+        if not meta["bar_met"]:
+            typer.echo(
+                f"    注意：只出到 {meta['count']} 条（判据 ≥8）——v3 够验机制，"
+                "不够撑三臂消融的统计功效，不要拿它报质量收益。"
+            )
+        # 性质复检不过就非零退出：一套不再满足「按构造必败」的 v3 会给出假的失败
+        if meta["property_violations"]:
+            typer.echo(f"性质复检失败 {len(meta['property_violations'])} 条：")
+            for line in meta["property_violations"][:10]:
+                typer.echo(f"  - {line}")
+            raise typer.Exit(1)
+        typer.echo("性质复检通过：每条的值只在 B 块、主语只在 A 块、两块同篇相邻")
+        return
     out_file = out or Path(cfg["eval"]["gold_file"])
     meta = generate(
         parsed, out_file, cfg["llm"], seed=seed, programmatic_only=programmatic_only
