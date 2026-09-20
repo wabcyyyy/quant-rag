@@ -139,14 +139,20 @@ def test_aborted_stream_is_counted_instead_of_vanishing(monkeypatch):
     """客户端中途断开：`done` 永不到达，这条请求不能从度量里整条消失。
 
     只记 `done` 的话，「成功率」是拿自己没记的那部分请求当分母算出来的。
+
+    必须直接拽 `body_iterator` 才能造出「读一个事件就断开」——走 TestClient 的话
+    portal 会把整条流跑到完成，断不开。而拽它要落在**有主人收摊的事件循环**里：
+    `StreamingResponse` 的同步生成器由 starlette 丢进 anyio 线程池跑，线程只在宿主
+    loop 正常结束时回收；裸 `asyncio.run()` 关掉 loop 时 root_task 的 done-callback
+    没机会触发，那个非 daemon 的 worker 线程就永久悬着——252 项测试打印完全过、
+    pytest 进程却不退出（2026-09-20 实测，泄漏点正是本条测试的前一版实现）。
     """
+    from anyio.from_thread import start_blocking_portal
     from fastapi.responses import StreamingResponse
 
     monkeypatch.setattr(api_main, "_orchestrator", lambda: _stream_orch(auth_token="t"))
     resp = api_main.query_stream(api_main.QueryIn(question="预算？"))
     assert isinstance(resp, StreamingResponse)
-
-    import asyncio
 
     async def _abort() -> str:
         it = resp.body_iterator  # starlette 已把同步生成器包成异步迭代器
@@ -154,9 +160,10 @@ def test_aborted_stream_is_counted_instead_of_vanishing(monkeypatch):
         await it.aclose()  # 模拟客户端在收到第一个事件后断开
         return first
 
-    first = asyncio.run(_abort())
-    assert "event: rewrite" in first
+    with start_blocking_portal() as portal:
+        first = portal.call(_abort)
 
+    assert "event: rewrite" in first
     out = metrics.render()
     assert "doc_rag_stream_incomplete_total 1" in out
     assert (
