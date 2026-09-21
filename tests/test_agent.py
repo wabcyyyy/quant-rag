@@ -109,17 +109,23 @@ class FakeRetriever:
 
 
 class FakeClient:
-    """只实现 `client.get(collection=..., points=[...], with_payload=True)`。"""
+    """只实现 `client.retrieve(collection_name=..., ids=[...], with_payload=True)`。
+
+    方法名与参数名必须和真客户端一致——见
+    `test_fake_client_surface_exists_on_real_qdrant_client`：上一版这里写的是
+    `get(collection=..., points=...)`，测试全绿，真库上第一次跑到 `read_window`
+    就 `AttributeError`（P2 首跑撞到的，1.19.1 上没有 `get`）。
+    """
 
     def __init__(self, points: dict[str, dict]):
         self.points = points  # 键 = point-id
         self.requested: list[list[str]] = []
 
-    def get(self, collection, points, with_payload=True):
-        assert collection == COLLECTION
-        self.requested.append(list(points))
+    def retrieve(self, collection_name, ids, with_payload=True):
+        assert collection_name == COLLECTION
+        self.requested.append(list(ids))
         out = []
-        for pid in points:
+        for pid in ids:
             payload = self.points.get(pid)
             if payload is not None:  # 真实 Qdrant 对不存在的点就是不返回，行为一致
                 out.append(SimpleNamespace(id=pid, payload=payload, score=0.0))
@@ -418,6 +424,23 @@ def test_neighbour_ids_only_walks_the_ordinal_and_stops_at_one():
 def test_point_id_matches_the_ingest_side():
     """point-id 的算法只有一个来源：indexer 的 uuid5(NAMESPACE_URL, chunk_id)。"""
     assert agent.chunk_point_id("d1:2") == str(uuid.uuid5(uuid.NAMESPACE_URL, "d1:2"))
+
+
+def test_fake_client_only_implements_real_methods():
+    """替身只能有真客户端有的方法、且参数名对得上。
+
+    这条是被 P2 首跑逼出来的：`read_window` 原来写 `client.get(collection=, points=)`，
+    替身照着写了个 `get`，测试全绿，真库上第一次执行就 AttributeError。测试绿的是
+    替身，不是链路——所以把「替身的接口面 ⊆ 真客户端」这件事本身变成断言。
+    """
+    import inspect
+
+    from qdrant_client import QdrantClient
+
+    assert not hasattr(QdrantClient, "get")  # 1.19.1：按 id 取点没有 get 这个入口
+    fake_params = inspect.signature(FakeClient({}).retrieve).parameters
+    real_params = inspect.signature(QdrantClient.retrieve).parameters
+    assert set(fake_params) <= set(real_params), (set(fake_params), set(real_params))
 
 
 def test_read_window_fetches_only_missing_neighbours():

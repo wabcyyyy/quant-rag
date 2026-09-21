@@ -295,9 +295,9 @@ def read_window(
                 wanted.append(neighbour)
     if not wanted or client is None or not collection:
         return []
-    points = client.get(
-        collection=collection,
-        points=[chunk_point_id(cid) for cid in wanted],
+    points = client.retrieve(
+        collection_name=collection,
+        ids=[chunk_point_id(cid) for cid in wanted],
         with_payload=True,
     )
     out = []
