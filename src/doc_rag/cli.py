@@ -324,7 +324,10 @@ def profile(
     typer.echo(f"总文件数: {result['total_files']}")
     typer.echo(f"来源构成: {result['source_distribution']}")
     scan = result["scan_suspects"]
-    typer.echo(f"疑似扫描件（非空则启用 MinerU 兜底）: {scan if scan else '无'}")
+    typer.echo(
+        "疑似扫描件（仅标记：OCR/MinerU 兜底未实现，这条链路目前不存在）: "
+        f"{scan if scan else '无'}"
+    )
     if result["pdf_errors"]:
         typer.echo(f"PDF 解析失败: {result['pdf_errors']}")
     typer.echo(f"明细已写入 {out_file}")
