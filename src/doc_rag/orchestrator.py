@@ -28,6 +28,7 @@ from qdrant_client import QdrantClient
 
 from . import agent as agent_mod
 from .generate import synthesizer as synthesizer_mod
+from .generate import two_stage as two_stage_mod
 from .ingest.embedder import Embedder
 from .log import get_logger
 from .retrieve.hybrid import HybridRetriever
@@ -59,6 +60,13 @@ class Result:
     # 「只扩展不替换」：现有结果文件的条目形状、检索指标分母都不该因为
     # 加了一层 policy 就悄悄变样。落盘与重放约束见 agent.py 的模块 docstring。
     trace: dict | None = None
+    # 两段式合成（ADR-0002）的路由结果与逐篇微摘要。`two_stage` / `two_stage_fallback`
+    # 时 summaries 非 None（重放纪律：reduce 输入可从落盘摘要逐字重建，缺记录值拒绝重放）；
+    # `single` 恒为 None——上下文仍存原始块，引用 [n] 指原始块序号，判分口径零改动。
+    synthesis_route: str = "single"
+    summaries: list[dict] | None = None
+    # map 段自己的开销（并行微摘要的墙钟与篇数/退化数）。单发路径恒为 None。
+    map_meta: dict | None = None
 
 
 def _ms(a: float, b: float) -> float:
@@ -144,6 +152,8 @@ class Orchestrator:
         honor_rewrite_budget: bool = False,
         mode: str | None = None,
         question_type: str | None = None,
+        require_citation: bool = True,
+        with_answer: bool = True,
     ) -> tuple[Result, Any, str, dict[str, float]]:
         retriever, synthesizer = self._parts(kb)
         t0 = time.perf_counter()
@@ -232,38 +242,83 @@ class Orchestrator:
             )
         t_agent = time.perf_counter()
 
+        # ── 两段式合成路由（ADR-0002）。与 agent 互斥：agent 已经替换了上下文预算
+        # 口径，再叠 map/reduce 等于一条臂混两个实验变量。require_citation=False 是
+        # 消融 #4 的无引用对照组，reduce prompt 没有无引用变体，同样不路由；
+        # 只检索（with_answer=False）与空清单更不该花 map 的钱。
+        route = "single"
+        if (
+            with_answer
+            and trace is None
+            and require_citation
+            and results
+            and two_stage_mod.is_routed(self.cfg, predicted)
+        ):
+            route = "two_stage"
+
         # 进 LLM 的块数 = min(max_contexts, rerank.top_n)。重排开启时生效值仍是
         # rerank.top_n（改造前是重排把清单砍到 6，然后 [:10] 不再动它）——同一批
         # 块、同一个顺序，所以这份上下文逐字没变，只有指标的分母被修正了。
         cap = int(self.cfg["retrieval"].get("max_contexts") or 0)
+        normal_budgets = [b for b in (cap, context_budget) if b > 0]
         if trace is not None:
             # agent 臂的上下文预算换成 `agent.max_contexts`，**不再**受 rerank.top_n 约束：
             # 沿用它就把多步并集又砍回 6 块，被砍掉的正是这层存在的理由。
             # 代价写在 PLAN §5.5 门槛 2——faithfulness 随上下文变长单调走高，所以
             # agent 臂必须配一条同块数的对照臂，才准它进答案轨结论。
             budgets = [int(trace["max_contexts"])]
+        elif route == "two_stage":
+            # 两段式臂的 map 段吃 retrieved 去重后的**全部**文档清单——照 agent 先例
+            # 开自己的预算分支：被 min(max_contexts, rerank.top_n) 截在 6 块的话，
+            # 逐篇微摘要就只剩 6 篇可摘，检索放宽的收益全被截掉（UPGRADE §3.1）。
+            budgets = [len(results)]
         else:
-            budgets = [b for b in (cap, context_budget) if b > 0]
+            budgets = normal_budgets
         capped = results[: min(budgets)] if budgets else list(results)
-        contexts = [
-            {
-                "no": i + 1,
-                "text": r["text"],
-                "doc": r["title"] or r["doc_id"],
-                "page": r["page"],
-            }
-            for i, r in enumerate(capped)
-        ]
-        citations = [
-            {
-                "no": c["no"],
-                "doc": c["doc"],
-                "page": c["page"],
-                "doc_id": r["doc_id"],
-                "block_type": r.get("block_type"),
-            }
-            for c, r in zip(contexts, capped)
-        ]
+
+        def _entries(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+            ctxs = [
+                {
+                    "no": i + 1,
+                    "text": r["text"],
+                    "doc": r["title"] or r["doc_id"],
+                    "page": r["page"],
+                    "doc_id": r["doc_id"],
+                }
+                for i, r in enumerate(rows)
+            ]
+            cites = [
+                {
+                    "no": c["no"],
+                    "doc": c["doc"],
+                    "page": c["page"],
+                    "doc_id": r["doc_id"],
+                    "block_type": r.get("block_type"),
+                }
+                for c, r in zip(ctxs, rows)
+            ]
+            return ctxs, cites
+
+        contexts, citations = _entries(capped)
+        summaries: list[dict] | None = None
+        map_meta: dict | None = None
+        map_marks: dict[str, float] = {}
+        if route == "two_stage":
+            map_marks["t_map_start"] = time.perf_counter()
+            summaries, map_meta = two_stage_mod.map_summaries(
+                self.cfg, question, contexts
+            )
+            map_marks["t_map"] = time.perf_counter()
+            if summaries is None:
+                # 失败率超阈值 → 整题退回单发口径并计数（`synthesis_route` 落到
+                # two_stage_fallback，eval 层对「全部退回」中止）。上下文换回单发
+                # 预算那份——退回的是**口径**，不是同一批块换个 prompt。
+                route = "two_stage_fallback"
+                summaries = None
+                capped = (
+                    results[: min(normal_budgets)] if normal_budgets else list(results)
+                )
+                contexts, citations = _entries(capped)
         result = Result(
             plan=plan,
             retrieved=results,
@@ -277,6 +332,9 @@ class Orchestrator:
             n_before_fallback=outcome.n_before_fallback,
             context_budget=len(capped),
             trace=trace,
+            synthesis_route=route,
+            summaries=summaries,
+            map_meta=map_meta,
         )
         marks = {
             "t0": t0,
@@ -288,6 +346,8 @@ class Orchestrator:
             # 只有真跑了扩展步才产出 `agent` 这一档延迟：单发路径的 latency_ms
             # 键集合是所有延迟分位数统计的既有口径，不能因为加了层就悄悄多一键。
             marks["t_agent"] = t_agent
+        if "t_map" in map_marks:
+            marks.update(map_marks)
         # 往外传的是**预测题型**而不是 aggregate 布尔：思考档那张表的键就是它
         # （`synthesizer.PREDICTED_TYPES`），传布尔等于让合成层再造一次同样的判断。
         return result, synthesizer, predicted, marks
@@ -313,6 +373,10 @@ class Orchestrator:
             # 而 `retrieval_total` 的口径是「不含 LLM、换模型不必重测」。端到端的
             # `total` 自然包含它；SLO 判读要看 total 与这一档的分布。
             out["agent"] = _ms(marks["t_agent"], marks["t_rerank"])
+        if "t_map" in marks:
+            # map 段（并行微摘要）单独一档，同理：它是 LLM 时间，不该混进
+            # retrieval_total；ADR-0002 的延迟门槛判读看 total 与这一档的和。
+            out["map_ms"] = _ms(marks["t_map"], marks["t_map_start"])
         return out
 
     def answer(
@@ -358,6 +422,8 @@ class Orchestrator:
             honor_rewrite_budget=honor_rewrite_budget,
             mode=mode,
             question_type=question_type,
+            require_citation=require_citation,
+            with_answer=with_answer,
         )
         if not with_answer:
             result.latency_ms = self._latency(marks, None, answered=False)
@@ -365,12 +431,23 @@ class Orchestrator:
         if stop_on_empty and not result.contexts:
             result.latency_ms = self._latency(marks, None, answered=False)
             return result
-        result.answer = synthesizer.answer(
-            question,
-            result.contexts,
-            require_citation=require_citation,
-            question_type=predicted,
-        )
+        if result.synthesis_route == "two_stage" and result.summaries is not None:
+            # ADR-0002 的 reduce 段：只吃逐篇微摘要，引用编号仍指原始块
+            # （`result.contexts` 存的就是原始块，citation 语义零改动）。
+            result.answer = two_stage_mod.answer(
+                synthesizer,
+                question,
+                result.contexts,
+                result.summaries,
+                question_type=predicted,
+            )
+        else:
+            result.answer = synthesizer.answer(
+                question,
+                result.contexts,
+                require_citation=require_citation,
+                question_type=predicted,
+            )
         # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta
         candidate = getattr(synthesizer, "last_meta", None)
         result.synth_meta = candidate if isinstance(candidate, dict) else None
@@ -406,6 +483,8 @@ class Orchestrator:
             force_aggregate=force_aggregate,
             mode=mode,
             question_type=question_type,
+            require_citation=require_citation,
+            with_answer=True,
         )
         yield {"type": "rewrite", "plan": result.plan}
         if stop_on_empty and not result.contexts:
@@ -414,12 +493,22 @@ class Orchestrator:
             yield {"type": "done", "result": result}
             return
         pieces: list[str] = []
-        for piece in synthesizer.answer_stream(
-            question,
-            result.contexts,
-            require_citation=require_citation,
-            question_type=predicted,
-        ):
+        if result.synthesis_route == "two_stage" and result.summaries is not None:
+            gen = two_stage_mod.answer_stream(
+                synthesizer,
+                question,
+                result.contexts,
+                result.summaries,
+                question_type=predicted,
+            )
+        else:
+            gen = synthesizer.answer_stream(
+                question,
+                result.contexts,
+                require_citation=require_citation,
+                question_type=predicted,
+            )
+        for piece in gen:
             pieces.append(piece)
             yield {"type": "delta", "text": piece}
         result.answer = "".join(pieces)

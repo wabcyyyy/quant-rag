@@ -109,6 +109,23 @@ rerank:
   # 它以前兼做清单截断，于是「有重排」臂在 6 条上算指标、对照臂在 8 条上算。
   top_n: 6
 
+synthesis:
+  two_stage:
+    # 两段式合成（ADR-0002）：聚合题 map（逐篇微摘要，并行、关思考）→
+    # reduce（聚合合成只吃摘要，引用编号仍指原始块）。默认关——单发口径是
+    # 全部已发布基线的载体；ADR-0002 门槛（keypoint vs A6 ≥+10pt 且聚合端到端
+    # p95 ≤8s，--fresh-answers 口径）双过才翻 true。评估臂走 `eval --two-stage`。
+    enabled: false
+    # 键域对齐 agent.types / llm.reasoning_effort_by_type：路由建在**预测**题型上
+    # （改写的 aggregate / year），真题型只做事后核对。填 term 会在构造时直接报错。
+    types: [cross_doc, time_filter]
+    # map 段自己的调用预算：可退化的步骤不该有合成侧 180s×4 的等待能力（W3 教训）。
+    # 单篇失败降级用原文首块；单题失败率超 fail_ratio → 整题退回单发并计数。
+    timeout_s: 20
+    max_attempts: 1
+    fail_ratio: 0.3
+    workers: 8 # 并行微摘要的线程数（照 ingest/indexer 的 ThreadPoolExecutor(8) 先例）
+
 agent:
   # Agentic RAG 的 policy 层（PLAN §5.5 / docs/design/AGENTIC_RAG.md）。
   # 默认 false：单发路径是所有已公布基线数字的载体，而 E2（上下文预算消融）还没跑——

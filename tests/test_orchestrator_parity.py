@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -29,6 +30,7 @@ from doc_rag.api import demo as demo_mod
 from doc_rag.api import main as api_main
 from doc_rag.eval import runner
 from doc_rag.generate import llm as llm_mod
+from doc_rag.generate import two_stage
 from doc_rag.generate.synthesizer import Synthesizer
 from doc_rag.orchestrator import Orchestrator
 from doc_rag.retrieve.hybrid import RetrievalOutcome
@@ -43,7 +45,7 @@ AGENT_CONTEXTS = 12  # agent 臂替换单发口径的那份预算（configs 里�
 _CTX_HEAD = re.compile(r"^\[\d+\] ", re.MULTILINE)
 
 
-def _cfg(agent_on: bool = False):
+def _cfg(agent_on: bool = False, two_stage_on: bool = False):
     cfg = {
         "llm": {"model": "m", "base_url": "http://l", "api_key": "k"},
         "retrieval": {"mode": "hybrid", "max_contexts": MAX_CONTEXTS},
@@ -78,6 +80,17 @@ def _cfg(agent_on: bool = False):
             "max_prompt_tokens": 100_000,
             "timeout_s": 20,
             "max_attempts": 1,
+        }
+    if two_stage_on:
+        cfg["synthesis"] = {
+            "two_stage": {
+                "enabled": True,
+                "types": ["cross_doc", "time_filter"],
+                "timeout_s": 20,
+                "max_attempts": 1,
+                "fail_ratio": 0.3,
+                "workers": 4,
+            }
         }
     return cfg
 
@@ -149,12 +162,28 @@ def judge():
 
 
 @pytest.fixture
-def prompt_spy(monkeypatch, judge):
+def mapper():
+    """map 段（两段式微摘要）的脚本，语义同上面的 `judge`：逐篇逐入口可重置。
+
+    回复按调用序循环取用：同一入口内每篇文档一份，跨入口必须看到同一序列。
+    map 段走线程池（workers>1），取号必须持锁——两篇文档取到同一个序号会让
+    「每入口 12 次调用」这条断言随机翻车。
+    """
+    return SimpleNamespace(
+        replies=["相关事实：该篇决定了事项甲", "无关"],
+        calls=[],
+        lock=threading.Lock(),
+    )
+
+
+@pytest.fixture
+def prompt_spy(monkeypatch, judge, mapper):
     """拦在 llm 层：记录真实 Synthesizer 拼出来的 prompt，而不是替身的答案。
 
-    三个调用方共用同一个 chat 入口（改写 / agent 判定 / 合成），必须按 system_prompt
-    分流：只把答案侧的调用记进 `seen`（否则「六次合成」会数成十八次），判定调用记进
-    `judge`——它的次数与 token 就是 agent mode 下要比的那几项。
+    四个调用方共用同一个 chat 入口（改写 / agent 判定 / map 微摘要 / 合成），必须按
+    system_prompt 分流：只把答案侧的调用记进 `seen`（否则「六次合成」会数错），
+    判定记进 `judge`，微摘要记进 `mapper`——后两者的次数与内容就是 agent /
+    two_stage mode 下要比的那几项。
     """
     from doc_rag.retrieve.rewrite_llm import SYSTEM_REWRITE
 
@@ -188,6 +217,23 @@ def prompt_spy(monkeypatch, judge):
             "reasoning_tokens": 0,
         }
 
+    def _map(user_prompt: str) -> str:
+        with mapper.lock:
+            i = len(mapper.calls)
+            mapper.calls.append({"user": user_prompt})
+        # 循环取用：篇数由 parity 断言锁（每入口 = 文档数），脚本只负责确定性
+        return mapper.replies[i % len(mapper.replies)]
+
+    def _map_meta() -> dict:
+        return {
+            "ms": 0.3,
+            "cached": False,
+            "model": "m",
+            "prompt_tokens": 60,
+            "completion_tokens": 12,
+            "reasoning_tokens": 0,
+        }
+
     def _timed(llm_cfg, user_prompt, system_prompt=None, temperature=None):
         if system_prompt == SYSTEM_REWRITE:
             return _rewrite_reply(user_prompt), {
@@ -197,6 +243,8 @@ def prompt_spy(monkeypatch, judge):
             }
         if system_prompt == agent.SYSTEM_EVIDENCE:
             return _evidence(user_prompt), _evidence_meta()
+        if system_prompt == two_stage.SYSTEM_MAP:
+            return _map(user_prompt), _map_meta()
         seen.append({"user": user_prompt, "system": system_prompt})
         return "答案 [1]", {"ms": 1.0, "cached": False, "model": "m"}
 
@@ -209,6 +257,8 @@ def prompt_spy(monkeypatch, judge):
             }
         if system_prompt == agent.SYSTEM_EVIDENCE:
             raise AssertionError("证据判定不该走流式：它是一次二元判定")
+        if system_prompt == two_stage.SYSTEM_MAP:
+            raise AssertionError("微摘要不该走流式：它是 map 段的短输出")
         seen.append({"user": user_prompt, "system": system_prompt})
         return iter(["答案 ", "[1]"]), {"ms": 1.0, "cached": False, "model": "m"}
 
@@ -290,11 +340,12 @@ ENTRIES: tuple[str, ...] = (
 )
 
 
-def _drive_all_entries(monkeypatch, tmp_path, cfg, judge=None):
+def _drive_all_entries(monkeypatch, tmp_path, cfg, judge=None, mapper=None):
     """把五条入口各跑一遍，各自触发一次合成；返回与调用顺序同名的清单。
 
-    `judge` 非空时每条入口之前清空判定脚本的游标：agent mode 下五条入口必须看到同一份
-    判决序列，否则步数/token 逐项相等这条断言没有意义。
+    `judge` / `mapper` 非空时每条入口之前清空对应脚本的游标：agent mode 下五条入口
+    必须看到同一份判决序列，two_stage mode 下必须看到同一份微摘要序列，否则
+    「逐项相等」这条断言没有意义。
     """
     from typer.testing import CliRunner
 
@@ -303,6 +354,8 @@ def _drive_all_entries(monkeypatch, tmp_path, cfg, judge=None):
     def _reset():
         if judge is not None:
             judge.calls.clear()
+        if mapper is not None:
+            mapper.calls.clear()
 
     monkeypatch.setattr(api_main, "_orchestrator", lambda: Orchestrator(cfg))
     client = TestClient(api_main.app, headers={"Authorization": "Bearer t"})
@@ -379,6 +432,58 @@ def test_agent_mode_traces_match_across_all_entries(
     assert len({tuple(t["sub_queries"]) for t in trace_spy}) == 1
     # 并集进来的新文档也要一致：某条入口少并了一篇，答案就不是同一批证据
     assert len({t["n_docs_union"] for t in trace_spy}) == 1
+
+
+# ── synthesis_route 维度：两段式臂下五条入口同样要逐项相等 ────────────────
+
+
+def test_two_stage_mode_matches_across_all_entries(
+    monkeypatch, tmp_path, wired, mapper
+):
+    """两段式的 parity（UPGRADE §3.5）：每入口 map 调用数、map 与 reduce 的 prompt、
+    latency 键集合逐项相等。
+
+    路由是 Orchestrator 内的分支而不是新入口，所以这条护栏的形态与 agent mode
+    那条相同：任何一条入口悄悄少跑 map、多喂一篇文档、或换一份 reduce prompt，
+    都会在这里表现为计数或内容不等。
+    """
+    cfg = _cfg(two_stage_on=True)
+    entries = _drive_all_entries(monkeypatch, tmp_path, cfg, mapper=mapper)
+
+    # mapper.calls 在每条入口前清空：收尾时剩下的就是**最后一条入口**的 map 调用。
+    # SpyRetriever 每次返回 12 篇不同文档 → 每入口应恰 12 次；其余入口若少跑/多跑，
+    # 它们的 reduce prompt（由摘要拼成）就不可能与其他入口逐字相等——下面那条接住。
+    assert len(mapper.calls) == 12, (
+        f"最后一条入口的 map 调用数应为文档篇数 12，实得 {len(mapper.calls)}——"
+        "清单长度或归组方式漂移了"
+    )
+    docs_mapped = {re.search(r"【文档】(.+)", c["user"]).group(1) for c in mapper.calls}
+    assert len(docs_mapped) == 12, "map 调用没有按文档归组：同一篇被摘要了不止一次"
+
+    reduces = [p for p in wired if p["system"] == two_stage.SYSTEM_ANSWER_TWO_STAGE]
+    assert len(reduces) == len(entries), "每入口应且只应有一次 reduce 调用"
+    assert {p["user"] for p in reduces} == {reduces[0]["user"]}, "reduce prompt 漂移"
+    # reduce 是两段式下唯一的「合成」调用；其余 seen 项不该存在
+    assert len(wired) == len(reduces), f"意外多出的合成调用：{entries}"
+
+    results = Orchestrator(cfg).answer(QUESTION)
+    assert results.synthesis_route == "two_stage"
+    assert results.summaries is not None and len(results.summaries) == 12
+    # 引用语义：contexts 仍是原始块（12 篇各 1 块），citation 编号指原始块序号
+    assert len(results.contexts) == N_RETRIEVED
+    assert [c["no"] for c in results.citations] == list(range(1, N_RETRIEVED + 1))
+    assert set(results.latency_ms) == {
+        "rewrite",
+        "retrieve",
+        "rerank",
+        "retrieval_total",
+        "map_ms",
+        "synthesize",
+        "synth_cached",
+        "total",
+    }
+    assert results.map_meta is not None and results.map_meta["n_docs"] == 12
+    assert results.map_meta["n_degraded"] == 0
 
 
 def test_agent_mode_widens_the_answer_prompt_by_design(wired, judge):

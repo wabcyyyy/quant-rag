@@ -40,6 +40,7 @@ from ..config import load_config
 from ..generate import prompts
 from ..generate.llm import cache_enabled
 from ..generate.synthesizer import Synthesizer
+from ..generate.two_stage import rebuild_summary_context, two_stage_cfg
 from ..ingest.embedder import Embedder
 from ..orchestrator import Orchestrator
 from ..retrieve.hybrid import HybridRetriever
@@ -212,6 +213,16 @@ def _retrieve_contexts(
     绝不当场重跑改写：拿新一次改写的结果去配旧答案，就是把度量对象换掉了。
     """
     assert retriever is not None  # 只在需要重建时才构建（构建它要花钱）
+    recorded = recorded or {}
+    if recorded.get("synthesis_route") == "two_stage":
+        # 两段式条目的 LLM 所见是逐篇微摘要，重放单次检索还原不出它（map 是
+        # 模型产出，同改写一个性质）。正确路径是读落盘 `summaries` 重建——那条
+        # 在 `ragas_from_results` 里做；走到这里说明摘要缺失，没有可重建的输入。
+        raise ValueError(
+            f"条目「{question[:24]}…」是两段式条目但缺少落盘 summaries，"
+            "重放检索还原不出 reduce 所见的微摘要——拒绝判分。"
+            "请用带 summaries 的结果文件（重跑 `doc-rag eval --two-stage`）。"
+        )
     if recorded and recorded.get("trace") is not None:
         # agent 条目的上下文是「逐步判定 + 逐步检索」的产物，重放检索只能还原出
         # 第一步那份清单——用它判旧答案等于换了度量对象。走到这里说明这份文件的
@@ -224,7 +235,6 @@ def _retrieve_contexts(
     flags = meta.get("retrieval") or ""
     use_rerank = "+rerank" in flags
     force_agg = aggregate or "+aggregate" in flags
-    recorded = recorded or {}
     override: dict | None = None
     if "+rewrite" in flags:
         if not recorded.get("rewritten"):
@@ -434,6 +444,12 @@ def evaluate(
                 # `rewritten` 同一个性质：不落 trace 的 agent 条目就没有重放资格
                 # （见 `_retrieve_contexts` 里那条拒绝）。单发条目恒为 null。
                 "trace": result.trace,
+                # 两段式合成（ADR-0002）：路由结果与逐篇微摘要。contexts 仍存原始块，
+                # 摘要独立落盘——reduce 的输入可从这两份逐字重建（重放守卫见
+                # `_retrieve_contexts` / `ragas_from_results`），缺记录值拒绝重放。
+                "synthesis_route": result.synthesis_route,
+                "summaries": result.summaries,
+                "map": result.map_meta,
                 "top_n_used": result.top_n_used,
                 "rewrite_top_n": result.rewrite_top_n,
                 "filter_applied": result.filter_applied,
@@ -467,6 +483,8 @@ def evaluate(
                     "retrieval_total": lat["retrieval_total"],
                     "synthesize": lat["synthesize"],
                     "synth_cached": lat["synth_cached"],
+                    # map 段（两段式臂）是 LLM 时间，单独一档；单发条目为 None
+                    "map_ms": lat.get("map_ms"),
                     "usage": usage,
                     "total": lat["total"],
                 },
@@ -666,6 +684,40 @@ def evaluate(
             "不能标成 +rewrite 使用；先修改写（见 doc-rag check-rewrite）。"
         )
 
+    # 两段式合成（ADR-0002）的自证：退回单发的条数必须可见——一条自称 two_stage
+    # 的臂里混进 N 条实际单发的条目，配对差就不再是「两段式 − 单发」。
+    # 全部退回直接中止（沿 rewrite / rerank 全失败中止的先例）：那轮实际是单发组。
+    ts_meta: dict | None = None
+    if two_stage_cfg(cfg)["enabled"] and per_item and with_answers:
+        routed = [
+            r
+            for r in per_item
+            if r.get("synthesis_route") in ("two_stage", "two_stage_fallback")
+        ]
+        fallback = [
+            r for r in routed if r.get("synthesis_route") == "two_stage_fallback"
+        ]
+        n_degraded_docs = sum(
+            sum(1 for s in r.get("summaries") or [] if s.get("degraded"))
+            for r in per_item
+            if r.get("summaries")
+        )
+        ts_meta = {
+            "enabled": True,
+            "types": list(two_stage_cfg(cfg)["types"]),
+            "fail_ratio": two_stage_cfg(cfg)["fail_ratio"],
+            "n_route_total": len(routed),
+            "n_two_stage": len(routed) - len(fallback),
+            "n_fallback": len(fallback),
+            "map_degraded_docs": n_degraded_docs,
+        }
+        if routed and len(fallback) == len(routed):
+            raise ValueError(
+                f"{len(routed)} 条两段式全部退回单发（微摘要失败率超阈值）——"
+                "本轮实际是「单发」组，不能标成 two_stage 使用；"
+                "先查 map 段失败原因（条目的 map 字段有逐篇原因）。"
+            )
+
     # 过滤回退必须计数：字段稀疏时它会整条丢掉过滤（并多付一次检索延迟）。
     # 一条自称「带元数据过滤」的臂里混进 N 条没过滤的条目，覆盖率就不是那个机制的
     # 效果了——和 rerank_failed / rewrite_degraded 是同一类自证。
@@ -732,6 +784,8 @@ def evaluate(
             # 上下文变长单调走高——不知道某条结果开没开 agent、开了几步，就不能拿它
             # 跟单发基线并排读数（PLAN §5.5 门槛 2 的同一条纪律）。
             "agent": agent_meta,
+            # 两段式臂同一条纪律：退回单发的条数、降级摘要的篇数都随文件自证
+            "synthesis": ts_meta,
             "retrieval": f"dense+bm25+rrf[{retriever.cfg.get('mode', 'hybrid')}]"
             + ("+aggregate" if aggregate else "")
             # 与 +rerank 的规则故意不同：这条串还是**重放**的输入（`_retrieve_contexts`
@@ -1162,10 +1216,17 @@ def probe_judge(results_file: Path, item_id: str, cfg: dict | None = None) -> di
     metric.llm = LangchainLLMWrapper(
         ChatOpenAI(**_judge_chat_kwargs(cfg), max_retries=0)
     )
+    contexts = item.get("contexts") or []
+    if item.get("synthesis_route") == "two_stage":
+        # 与 `ragas_from_results` 同一条规则：两段式条目的 judge 所见是摘要重构串
+        summaries = item.get("summaries")
+        if not summaries:
+            return {"error": f"{item_id} 缺少落盘 summaries，无法还原 judge 上下文"}
+        contexts = [rebuild_summary_context(summaries, contexts)]
     row = {
         "user_input": item["question"],
         "response": item["answer"],
-        "retrieved_contexts": item.get("contexts") or [],
+        "retrieved_contexts": contexts,
     }
 
     async def _run() -> dict:
@@ -1248,6 +1309,28 @@ def ragas_from_results(
     mismatched: list[str] = []
     for raw in picked:
         contexts = raw.get("contexts")
+        if raw.get("synthesis_route") == "two_stage":
+            # 两段式条目：judge 必须看到 reduce 所见的「摘要 + 原始块编号前缀」，
+            # 不是原始块——两者都随条目落盘，逐字重建（缺 summaries 在
+            # `_retrieve_contexts` 的守卫里拒绝；这里先显式拦一遍报错更可读）。
+            summaries = raw.get("summaries")
+            if not summaries:
+                raise ValueError(
+                    f"条目 {raw['id']} 是两段式条目但缺少落盘 summaries——"
+                    "拒绝判分（judge 看不到 LLM 实际所见的摘要）。"
+                )
+            rows.append(
+                {
+                    "id": raw["id"],
+                    "type": raw["type"],
+                    "user_input": raw["question"],
+                    "response": raw["answer"],
+                    "retrieved_contexts": [
+                        rebuild_summary_context(summaries, contexts)
+                    ],
+                }
+            )
+            continue
         if _legacy_contexts(contexts):
             ctx = _retrieve_contexts(
                 raw["question"], meta, retriever, cfg, recorded=raw

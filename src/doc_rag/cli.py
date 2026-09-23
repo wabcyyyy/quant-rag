@@ -869,6 +869,13 @@ def evaluate(
             "`rerank.top_n`——进 LLM 的块数是这两者的 min，只改一个不动作。"
         ),
     ] = None,
+    two_stage: Annotated[
+        bool,
+        typer.Option(
+            help="两段式合成（ADR-0002）：聚合题 map（逐篇微摘要）→ reduce。"
+            "评估臂开关；生产默认跟配置 synthesis.two_stage.enabled"
+        ),
+    ] = False,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -898,6 +905,16 @@ def evaluate(
         cfg["llm"]["prompt_version"] = prompt_version
         typer.echo(
             f"合成 prompt 版本：{prompt_version}（指纹 {prompts.fingerprint(prompt_version)}）\n"
+        )
+
+    if two_stage:
+        # 评估臂开关：只改本次进程的配置，不落盘。路由按预测题型走
+        # （synthesis.two_stage.types），单发题型不受影响——与 agent_mode 的
+        # 「评估臂显式、部署读配置」是同一条分工。
+        cfg.setdefault("synthesis", {}).setdefault("two_stage", {})["enabled"] = True
+        typer.echo(
+            "两段式合成已开启（--two-stage）：聚合题 map→reduce，"
+            f"题型域 {cfg['synthesis']['two_stage'].get('types') or ['cross_doc', 'time_filter']}\n"
         )
 
     if fresh_judge and not (ragas or ragas_from is not None):

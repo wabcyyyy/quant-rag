@@ -126,6 +126,10 @@ def _record(result, *, endpoint: str) -> None:
     if result.filter_fallback:
         # 过滤后结果太少 → 这轮其实是「无过滤」。它悄悄改变答案依据，必须能看见。
         metrics.inc("doc_rag_filter_fallback_total")
+    if getattr(result, "synthesis_route", None) == "two_stage_fallback":
+        # 两段式（ADR-0002）：map 失败率超阈值整题退回单发。不计数就没人知道
+        # 这条答案其实是单发口径出的。
+        metrics.inc("doc_rag_synthesis_fallback_total")
     trace = result.trace
     if trace:
         # agent 层的四条：开了几步、停在哪、花了多少、有多少「停」其实是判定挂了。
