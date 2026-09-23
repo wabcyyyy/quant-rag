@@ -1,8 +1,11 @@
 """判分口径的回归护栏：名字必须说实话，未定义不能印成 0。
 
 六条各挡一类曾经过的错误读数：
-1. `recall_at_k` 其实是「首命中在前 k 位」= Hit@k。64 条可答题里 44 条只有 1 篇
-   gold，剩下 20 条 gold 有 10~56 篇——在 8 个槽位上报 Recall 是自欺。
+1. `recall_at_k` 这个名字当年被叫错过一次：手上有 ranked 清单之前，逐条只存了
+   「首命中位次」，所以报出来的其实是 Hit@k——64 条可答题里 44 条只有 1 篇 gold，
+   剩下 20 条 gold 有 10~56 篇，在 8 个槽位上报 Recall 是自欺。于是它被改名成
+   `hit_at_k`，`recall_at_*` 空出来等真正的定义。2026-09-21 起 ranked 清单逐条落盘，
+   **两个名字都在，且必须给出不同的数**（相等就说明有一个是假的）。
 2. 覆盖率必须和自己的结构上限一起报：清单 8 格、gold 56 篇时 0.143 就是满分。
 3. `coverage_by_type` 不能给无 gold 的题型（no_answer）编一个 0.0——那是把
    「未定义」印成「测出来是 0」，和那个恒真的 over_refusal 同源。
@@ -115,13 +118,60 @@ def run(tmp_path, monkeypatch):
     return _run(monkeypatch, _gold_file(tmp_path))
 
 
-def test_summary_reports_hit_rates_and_never_claims_recall(run):
+def test_hit_and_recall_are_both_reported_and_differ(run):
+    """Hit@5 与 Recall@5/Precision@5 同时存在、且**数值不同**——这是各自说实话的证据。
+
+    当年只有 `recall_at_k` 这个名字、没有逐条 ranked 清单，报的其实是 Hit@k，
+    于是把它改名成 hit 并把 recall 空出来（本文件模块 docstring 第 1 条）。
+    2026-09-21 起 ranked 清单落盘，recall 才第一次真可算。
+    **同一截断下几个数若相等，说明其中有一个是假的。**
+    """
     s = run["summary"]
-    assert "recall_at_5" not in s and "recall_at_8" not in s
-    # d1/x1/d3 都在前 3 位 → 三条可答题的 gold 都命中
-    assert s["hit_at_5"] == 1.0
-    assert s["hit_at_8"] == 1.0
-    assert s["hit_within_budget"] == 1.0
+    assert s["hit_at_5"] == 1.0 and s["hit_at_8"] == 1.0
+    assert s["recall_at_list_macro"] == pytest.approx((1 + 1 / 12 + 1) / 3, abs=1e-4)
+    assert s["recall_at_5"] != s["hit_at_5"]
+    # 标准族只有一个截断：K=5。曾经扫 1/3/5/10，其中 @10 在 8 格清单上逐条等于
+    # 整条清单的召回——一个看着独立、其实是复制的假数据点，所以删。
+    for m in ("recall_at_1", "recall_at_3", "recall_at_10", "precision_at_list"):
+        assert m not in s, m
+    for m in ("recall_at_5", "precision_at_5", "ndcg_at_5", "map_at_5"):
+        assert s[m] is not None, m
+    # 归一化召回是**逐条比值取均值**，不是两个均值相除——两者在这里就不相等
+    assert s["recall_vs_ceiling_macro"] != pytest.approx(
+        s["recall_at_list_macro"] / s["recall_ceiling_macro"], abs=1e-3
+    )
+    # 旧名从标准名派生、同值：外部脚本与历史命令不失效，但两个名字不可能各自漂移
+    assert s["mean_doc_coverage"] == s["recall_at_list_macro"]
+    assert s["hit_within_budget"] == s["hit_at_list"]
+    assert s["coverage_ceiling_mean"] == s["recall_ceiling_macro"]
+
+
+def test_rank_metrics_are_the_textbook_definitions():
+    """`_rank_metrics` 的手算锁：去重、截断、AP 的分子分母都要能一格格数出来。
+
+    清单（含重复，同篇第二个块不占新位）：d1 d2 d1 d3 d4 d5
+    去重保序后：                        d1 d2 d3 d4 d5
+    gold = {d2, d5}
+
+      K=5：top5 = d1..d5，命中 2 篇
+        Recall@5    = 2/2 = 1.0
+        Precision@5 = 2/5 = 0.4      ← 分母是 k，不是块数（旧写法给的是 2/6）
+        AP@5        = (1/2 + 2/5) / min(#gold=2, 5) = 0.9/2 = 0.45   命中在第 2、5 位
+      K=3：top3 = d1 d2 d3，命中 1 篇
+        Recall@3 = 1/2 = 0.5 · Precision@3 = 1/3 · AP@3 = (1/2)/min(2,3) = 0.25
+    """
+    got = ["d1", "d2", "d1", "d3", "d4", "d5"]
+    gold = {"d2", "d5"}
+    out = runner._rank_metrics(got, gold)
+    assert out["recall_at_5"] == pytest.approx(1.0)
+    assert out["precision_at_5"] == pytest.approx(2 / 5, abs=1e-4)
+    assert out["ap_at_5"] == pytest.approx((1 / 2 + 2 / 5) / 2, abs=1e-4)
+    k3 = runner._rank_metrics(got, gold, k=3)
+    assert k3["recall_at_3"] == pytest.approx(0.5)
+    assert k3["precision_at_3"] == pytest.approx(1 / 3, abs=1e-4)
+    assert k3["ap_at_3"] == pytest.approx(0.25)
+    # 无 gold（no_answer 题）→ 空 dict，不是全 0：未定义不能印成 0
+    assert runner._rank_metrics(got, set()) == {}
 
 
 def test_coverage_is_reported_with_its_own_ceiling(run):
@@ -251,3 +301,17 @@ def test_subsequence_matching_has_no_false_positive_bound():
     assert runner._contains_as_subsequence("通过决议", unrelated)  # 子序列放行
     # 有序但无上界：换个字序就不命中，说明它唯一的作用是放宽距离
     assert not runner._contains_as_subsequence("决议通过", unrelated)
+
+
+def test_refusal_acc_is_undefined_not_zero_without_answers(monkeypatch, tmp_path):
+    """`--retrieval-only` 下拒答正确率必须是 None，不是 0.0。
+
+    拒答题压根没生成答案时 `answered_ok` 全是 None，拿 `len(refusables)` 当分母
+    就把「没测」印成「测了且全错」——同一类错误本文件已经禁过两次（no_answer 不给
+    覆盖率编 0.0、over_refusal 的 None 不参与）。这条是 2026-09-21 跑全量
+    retrieval-only 时从输出里看出来的（它当时印 0.0）。
+    """
+    s = _run(monkeypatch, _gold_file(tmp_path), with_answers=False)["summary"]
+    assert s["refusal_acc"] is None
+    # 反证：带答案跑时同一条必须给出真数，否则上面那个 None 只是「压根没算」
+    assert _run(monkeypatch, _gold_file(tmp_path))["summary"]["refusal_acc"] == 1.0

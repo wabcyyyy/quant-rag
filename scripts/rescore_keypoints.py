@@ -27,7 +27,7 @@ from statistics import mean
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from doc_rag.eval.schema import kp_normalize
+from doc_rag.eval.schema import LEGACY_SUMMARY_KEYS, kp_normalize
 
 GOLD_FILE = "data/eval/gold.json"
 # 与 runner._GRADE_FULL_RATIO 同值。这里不复用而是抄一份常量：runner 会连 Qdrant
@@ -64,13 +64,13 @@ def rescore(path: str, gold_file: str = GOLD_FILE) -> str:
         scored.append(row)
 
     summary = data["summary"]
-    summary["keypoint_hit_mean"] = (
+    summary["keypoint_recall_macro"] = (
         round(mean(r["keypoint_hit"] for r in scored), 4) if scored else None
     )
     by_type: dict[str, list[float]] = {}
     for r in scored:
         by_type.setdefault(r["type"], []).append(r["keypoint_hit"])
-    summary["keypoint_hit_by_type"] = {
+    summary["keypoint_recall_by_type"] = {
         t: round(mean(v), 4) for t, v in sorted(by_type.items())
     }
     summary["keypoint_n_items"] = len(scored)
@@ -84,13 +84,17 @@ def rescore(path: str, gold_file: str = GOLD_FILE) -> str:
     for r in scored:
         grades[r["answer_grade"]] += 1
     summary["answer_grade_counts"] = grades
+    # 旧键从 runner 那张表派生，和 eval 直跑写的是同一份映射——两处各写一遍就会漂移
+    for legacy, canonical in LEGACY_SUMMARY_KEYS.items():
+        if canonical in summary:
+            summary[legacy] = summary[canonical]
     # 自证这份文件是重判出来的，而不是合成时算出来的：两件事的判据版本可能不同
     summary["keypoint_rescored_from"] = str(path)
 
     out = Path(path).with_name(Path(path).stem + "_kc.json")
     out.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     print(
-        f"{Path(path).name}: n={len(scored)} mean={summary['keypoint_hit_mean']} "
+        f"{Path(path).name}: n={len(scored)} mean={summary['keypoint_recall_macro']} "
         f"grades={grades} -> {out.name}"
     )
     return str(out)

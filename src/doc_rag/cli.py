@@ -634,9 +634,17 @@ def gen_gold(
     limit: Annotated[
         int, typer.Option(help="v3 最多出几条（原料由 census/probe 判据决定）")
     ] = 12,
+    term_extra: Annotated[
+        bool,
+        typer.Option(
+            help="生成 term 扩题独立文件：零 LLM，从「字段名：值」形状抽题，"
+            "值全库唯一且逐字可核对。必须配 --out 指一个新文件，"
+            "与已发布 72 条并列报数、不合成一个数。"
+        ),
+    ] = False,
 ) -> None:
     """生成黄金评估集（LLM 生成 + 程序化构造，构造过程可复现）。"""
-    from doc_rag.eval.goldgen import generate, generate_v3
+    from doc_rag.eval.goldgen import generate, generate_term_extra, generate_v3
 
     cfg = load_config()
     parsed = Path(cfg["paths"]["parsed"])
@@ -668,6 +676,28 @@ def gen_gold(
                 typer.echo(f"  - {line}")
             raise typer.Exit(1)
         typer.echo("性质复检通过：每条的值只在 B 块、主语只在 A 块、两块同篇相邻")
+        return
+    if term_extra:
+        if out is None:
+            typer.echo("--term-extra 必须配 --out 指一个新文件（不许覆盖已发布考卷）")
+            raise typer.Exit(1)
+        meta = generate_term_extra(
+            parsed, out, limit=limit, exclude_file=Path(cfg["eval"]["gold_file"])
+        )
+        typer.echo(f"term 扩题已生成：{out}")
+        typer.echo(
+            f"共 {meta['count']} 条 · 原料 {meta['candidates_label_value']} 个合格「字段名：值」"
+        )
+        typer.echo(f"    按术语类别的可选池：{meta['pool_by_family']}")
+        typer.echo(f"    与 {meta['excluded_against']} 去重（同篇同值不重复出题）")
+        if meta["property_violations"]:
+            typer.echo(f"性质复检失败 {len(meta['property_violations'])} 条：")
+            for line in meta["property_violations"][:10]:
+                typer.echo(f"  - {line}")
+            raise typer.Exit(1)
+        typer.echo(
+            "性质复检通过：值逐字在该篇、全库只此一篇、题面短名在正文、无 URL/多人清单"
+        )
         return
     out_file = out or Path(cfg["eval"]["gold_file"])
     meta = generate(
@@ -978,27 +1008,41 @@ def evaluate(
         typer.echo(
             "  [口径混合] " + "；".join(mixed) + "——逐条字段可追，本轮不是纯条件"
         )
-    # 名字就叫 Hit：它量的是「首命中在前 k 位」，不是「找全了 gold」
-    typer.echo(f"Hit@5           : {s['hit_at_5']}")
-    typer.echo(f"Hit@8           : {s['hit_at_8']}")
-    typer.echo(f"Hit@清单末      : {s['hit_within_budget']}")
-    typer.echo(f"MRR             : {s['mrr']}")
-    typer.echo(f"nDCG@8          : {s.get('ndcg_at_8')}")
-    typer.echo(f"包含匹配准确率   : {s['contains_acc']}")
-    typer.echo(f"拒答正确率      : {s['refusal_acc']}（只查拒答措辞）")
+    # 名字一律用 IR 的标准读法，且 Hit 与 Recall 分家：Hit@k 只回答「前 k 位里碰到没有」，
+    # Recall@k 才回答「gold 里捞回了几篇」。当年 `recall_at_k` 报的其实是 Hit@k，
+    # 因为逐条只存了首命中位次、算不出后者——现在 ranked 清单落盘了，两者都给。
     typer.echo(
-        f"过度拒答        : ctx含原话 {s.get('over_refusal_rate')}"
+        f"Hit@5 / @8 / @清单   : {s['hit_at_5']} / {s['hit_at_8']} / {s['hit_at_list']}"
+    )
+    typer.echo(
+        f"K=5 标准族          : Recall {s.get('recall_at_5')}"
+        f" · Precision {s.get('precision_at_5')}"
+        f" · nDCG {s.get('ndcg_at_5')}"
+        f" · MAP {s.get('map_at_5')}"
+    )
+    typer.echo(
+        f"Recall@清单 macro   : {s['recall_at_list_macro']}"
+        f"（上限 {s.get('recall_ceiling_macro')}"
+        f" · 归一 {s.get('recall_vs_ceiling_macro')}）"
+    )
+    typer.echo(f"MRR                : {s['mrr']}")
+    typer.echo(f"nDCG@8（历史基线） : {s.get('ndcg_at_8')}")
+    typer.echo(f"  分题型 Recall    : {s['recall_by_type']}")
+    typer.echo(f"  分题型上限       : {s.get('recall_ceiling_by_type')}")
+    typer.echo(f"严格关键词准确率    : {s['strict_keyword_accuracy']}")
+    if s.get("keypoint_recall_macro") is not None:
+        typer.echo(
+            f"要点召回 macro(聚合) : {s['keypoint_recall_macro']}"
+            f"（n={s.get('keypoint_n_items')}，K={s.get('keypoint_k')}）"
+        )
+    typer.echo(f"拒答正确率         : {s['refusal_acc']}（只查拒答措辞）")
+    typer.echo(
+        f"过度拒答           : ctx含原话 {s.get('over_refusal_rate')}"
         f" / gold已进上下文 {s.get('over_refusal_gold_rate')}"
     )
-    typer.echo(f"引用有效率      : {s['citation_valid_rate']}")
-    typer.echo(f"引用存在率      : {s.get('citation_presence_rate')}")
-    typer.echo(
-        f"文档覆盖率      : {s['mean_doc_coverage']}"
-        f"（本清单长度下的上限 {s.get('coverage_ceiling_mean')}）"
-    )
-    typer.echo(f"  分题型覆盖率  : {s['coverage_by_type']}")
-    typer.echo(f"  分题型上限    : {s.get('coverage_ceiling_by_type')}")
-    typer.echo(f"  清单长度      : {s.get('list_len')}")
+    typer.echo(f"引用有效率         : {s['citation_valid_rate']}")
+    typer.echo(f"引用存在率         : {s.get('citation_presence_rate')}")
+    typer.echo(f"  清单长度         : {s.get('list_len')}")
     _print_latency(s.get("latency"))
     if results.get("ragas"):
         typer.echo(f"RAGAS           : {results['ragas']}")
@@ -1241,10 +1285,19 @@ def compare_retrieval(
     - 答案级（`keypoint_hit_ratio`，分母 = 有逐篇要点的聚合题）：只看答案文本，块数
       不等是实验变量不是伪影；这条轨上唯一该拦的是两臂的要点数 K 不同（分母变了）。
     """
-    from doc_rag.eval.compare import RETRIEVAL_METRICS, RETRIEVAL_SWEEP, format_report
+    from doc_rag.eval.compare import (
+        METRIC_ALIASES,
+        RETRIEVAL_METRICS,
+        RETRIEVAL_SWEEP,
+        format_report,
+    )
     from doc_rag.eval.compare import compare_retrieval as sweep
 
     metrics = tuple(metric) if metric else RETRIEVAL_SWEEP
+    # 旧名先回落成标准名再校验：PLAN/README 里写下的复现命令（`--metric
+    # keypoint_hit_ratio`）不能因改名失效。顺带去重——同一指标用两个名字点进来
+    # 会在 Holm 家族里被算成两次比较，白白收紧其余指标的 α。
+    metrics = tuple(dict.fromkeys(METRIC_ALIASES.get(m, m) for m in metrics))
     unknown = [m for m in metrics if m not in RETRIEVAL_METRICS]
     if unknown:
         typer.echo(f"未知指标：{unknown}（可选：{', '.join(RETRIEVAL_METRICS)}）")

@@ -938,3 +938,315 @@ def generate_v3(parsed_dir: Path, out_file: Path, limit: int = 12) -> dict:
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return meta_out
+
+
+# ── term 扩题（零 LLM、独立文件、不与已发布的 72 条混口径）────────────────
+#
+# 为什么要单独扩这一类：已发布考卷里 term 只有 12 条，一条题的权重就是 8.3pt，
+# 「term 是弱项」在这个 n 上只是传闻。而 term 原先只有一条出题路——`_gen_for_doc`
+# 让 LLM 读整篇再编题，扩题就要花钱，且同一份文档两次生成的题面不一样（不可复现）。
+# 纯规则的另一条路其实一直躺在语料里：「字段名：值」的形状（`主持人：@贝佳淼`、
+# `统一社会信用代码：91350206MA31EQ756Y`、`高级运维服务：250元/月`）本身就是
+# 精确词召回题，抽出来即可，而且每条判据都能机器复核。
+#
+# 六条入场判据（`term_property_violations` 逐条复检，不通过就非零退出）：
+# 1. **值整个就是一个术语**——金额/单位、《》、文件名、编号、@人名、规格、制度/系统后缀。
+#    裸日期、页码、序号、「句子里恰好提到某个系统名」都不算。
+# 2. **值全库唯一**——复用聚合题那台 `_KeyPointIndex`。同一句在别篇也有，gold 就不止
+#    一篇，题目自身有歧义，后面的召回数没法解释。
+# 3. 值 4~30 字：短于此的不是术语，长于此的是整句话（那是 fact 题）。
+# 4. 值里 @ 提及 ≤1 个：`参会者：@甲@乙@丙@丁` 考的是照抄清单，不是找词。
+# 5. **题面里的《短名》逐字出现在该篇正文里**：短名不在正文，这道题就没法靠「文档里
+#    确有的名字」被检回，出题侧的缺陷会被算成检索侧的失败。
+# 6. label 得像个字段名（≤10 字、无顿号、不以虚词开头结尾）——「label：值」这个形状里，
+#    label 是题面唯一被问的东西，它是一句话时这道题就没有问句。
+
+# label ≤10 字：字段名不会比这更长。人工第三轮读到的 `同一概念全程使用相同名称：结构规范`
+# 是一条写坏了的规则句，问「X 是什么」答非所问。
+# 行首要允许列表/编号前缀：这份语料是飞书导出，字段行长成
+# `10. .com域名：85元/年`、`1. 最小规格（2核CPU，1G内存，0副本）：67元/月`。
+# 不放行的话正则只能去截长句的尾巴当 label——实测漏进
+# `一概念全程使用相同名称：结构规范`、`会信用代码(即税号：12100000425006256E`。
+_TERM_LEAD = r"^[ \t]*(?:(?:[\d]{1,3}[.、．]|[（(][一二三四五六七八九十\d]{1,3}[)）]|[-*•·>｜|])[ \t]*)?"
+_TERM_PAIR = re.compile(
+    rf"(?m){_TERM_LEAD}([一-龥A-Za-z0-9（）()·.％%]{{2,10}})[:：]\s*([^\n:：|]{{1,44}})"
+)
+# 表格导出的字段行不带冒号，用空格分隔：`统一社会信用代码 91350206MA31EQ756Y`。
+# 只放宽**分隔符**，不放宽 label：label 必须长成字段名的样子（这些后缀），
+# 否则「主语+谓语」的普通句子会被当成字段行，出题质量就退回第一轮那批散文。
+_TERM_FIELD_SUFFIX = "名称|编号|金额|价格|费用|话费|电话|手机号|账号|帐号|号码|日期|格式|标识|规格|单价|月费|年费"
+_TERM_PAIR_CELL = re.compile(
+    rf"(?m){_TERM_LEAD}([一-龥A-Za-z0-9]{{2,12}}(?:{_TERM_FIELD_SUFFIX}))[ \t]+([^\s，。；:：|]{{2,40}})"
+)
+_TERM_TAIL_NOTE = re.compile(r"[（(][^（）()]{1,20}[)）]$")
+# 值必须**整个就是**一个术语，不是「句子里带个术语」。第一版写成 `search`，人工逐条读
+# 24 条只保住 6 条像题：`应用前景：这种系统在未来的建筑保温领域具有广阔的应用前景`
+# （散文）、`评审：[2025年第3周\-联盟评审2\-数据工程手册](https`（markdown 链接被冒号截断）、
+# `主要考量如下：@黄梓姗指出`（半句）。改成命名组的 fullmatch 后，类别与判据合成一件事：
+# 命中哪个组就是哪一类，不再有 `_TERM_SHAPE` 与 `_TERM_FAMILIES` 两张会漂移的表。
+_TERM_VALUE = re.compile(
+    r"(?P<金额>\d+(?:\.\d+)?\s*元\s*/\s*[月年次台人条])"
+    r"|(?P<文件名>[\w一-龥()（）\-]{1,40}\.(?:docx|xlsx|xls|pdf|pptx|csv|zip))"
+    r"|(?P<人名>@[一-龥]{2,4})"
+    r"|(?P<编号>[A-Za-z0-9][A-Za-z0-9\-–—_.]{5,29}号?)"
+    r"|(?P<名称>《[^》、，。：:！!？?\s]{2,28}》)"
+    r"|(?P<规格>\d+\s*核[^，,\n]{0,12}内存[^，,\n]{0,12})"
+    r"|(?P<周次>\d{4}年第\d{1,2}周)"
+    r"|(?P<制度名>[一-龥A-Za-z0-9]{2,14}(?:系统|平台|小程序|公众号|网站|制度|规范|办法|细则|表格|清单|模板))"
+)
+# 第二轮人工读题（24 条丢 8 条）总结出的三条：
+#  · 「XX清单/XX平台」这类值其实是半句散文（`需要负责人清单`、`系统的免疫系统`、
+#    `交付第一轮整理的表格`）——制度名类要挡掉带虚词的写法；
+#  · `本周进展：7.29` 这种纯点分短串过了「编号」形状但毫无术语含量——编号要么含字母，
+#    要么长到真是电话/账号（≥11 位数字）；
+#  · label 以虚词开头/结尾、或含「包含/以下」的是句子不是字段名
+#    （`从成规上路：写作基本规范`、`需要我们做的：制定商务回复标准模板`）。
+_TERM_PROSE_VALUE = re.compile(
+    r"的|需要|对应|相关|所有|各个|以及|以下|并|区别于|不同于|旨在"
+)
+_TERM_BAD_LABEL_MORE = re.compile(
+    r"^(?:从|并|且|但|则|如|对|和|与)|包含|以下|以及|主要|(?:的|是|了)$"
+)
+_TERM_MAX_VALUE = 30
+_TERM_MAX_PER_LABEL = 2
+# label 得像个字段名：URL 那类高频 label 后面跟的是一句话而不是一个词
+# （实测 1327 个「label：值」候选里，`(https` 一个 label 就占 307 条）。
+_TERM_BAD_LABEL = re.compile(
+    r"^(?:https?|www|ftp|备注|说明|例如|比如|问题|回答|答案|结论|目标|计划|内容|优点|缺点"
+    r"|适用范围|背景|意义|价值|方法|方式|步骤|流程|原因|依据|来源|参考|附件|链接|地址"
+    r"|阶段\d*|第[一二三四五六七八九十]+阶段|复盘|行动|层级|其他|补充|注|图示|女主|男主)"
+    r"[、，,]|[（(].*[)）]|如下$|以下$|等$"
+)
+# 题面短名从这里取；模板词（会议纪要/周会/办公会…）当短名出的题不指认任何一篇文档
+_TERM_TEMPLATES = (
+    "在《{name}》中，{label}是什么？",
+    "根据《{name}》，{label}填的是哪一项？",
+    "《{name}》里记录的{label}是什么？",
+)
+
+
+def _term_short_name(title: str) -> str:
+    """标题路径的最后一段——人提这份文档时真正会说的名字（`工作档案_SSC职能_XX报价单`→`XX报价单`）。"""
+    segs = [s for s in re.split(r"[_/]", title or "") if s.strip()]
+    return segs[-1].strip() if segs else (title or "")
+
+
+def _term_value_of(value: str) -> tuple[str, str] | None:
+    """整个值是不是一个术语；返回 (类别, 判据用的核)。
+
+    「核」是去掉装饰后必须逐字出现在答案里的那串字：`@贝佳淼`→`贝佳淼`（模型转述不会照抄 @），
+    `《创始人特别探索与赋能条例》`→`创始人特别探索与赋能条例`（会不会带书名号取决于措辞，
+    而判据要的是那个名字本身）。唯一性也按核判——按带 @ 的原文判会把「王怡崴」和
+    「@王怡崴」当成两个词。
+    """
+    m = _TERM_VALUE.fullmatch(value.strip())
+    if not m:
+        return None
+    fam = next(k for k in _TERM_VALUE.groupindex if m.group(k) is not None)
+    value = value.strip()
+    if fam == "制度名" and _TERM_PROSE_VALUE.search(value):
+        return None
+    if fam == "编号":
+        digits = re.sub(r"\D", "", value)
+        if not re.search(r"[A-Za-z]", value) and len(digits) < 11:
+            return None  # `2025-12-29` 这种纯日期串不是术语，是日期
+    core = (
+        m.group("人名")
+        if fam == "人名"
+        else (m.group("名称").strip("《》") if fam == "名称" else value)
+    )
+    core = kp_normalize(core)
+    if not (4 <= len(core) <= _TERM_MAX_VALUE):
+        return None
+    return fam, core
+
+
+def _term_candidates(docs: list[dict], index: _KeyPointIndex) -> list[dict]:
+    """所有通过入场判据的「字段名：值」候选（按 doc_id、出现位置稳定排序）。"""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for d in sorted(docs, key=lambda x: x["doc_id"]):
+        name = _term_short_name(d["title"])
+        norm_text = kp_normalize(d["text"])
+        if not (4 <= len(name) <= 30) or _V3_TEMPLATE_SUBJECT.match(name):
+            continue
+        if kp_normalize(name) not in norm_text:
+            continue  # 判据 5
+        pairs = list(_TERM_PAIR.finditer(d["text"])) + list(
+            _TERM_PAIR_CELL.finditer(d["text"])
+        )
+        for m in pairs:
+            label = _clean_text(m.group(1)).strip("、·（）()")
+            value = re.sub(r"[。；;，,]+$", "", _clean_text(m.group(2)).strip())
+            value = _TERM_TAIL_NOTE.sub("", value).strip()
+            if (
+                _TERM_BAD_LABEL.search(label)
+                or _TERM_BAD_LABEL_MORE.search(label)
+                or len(label) < 2
+                or "、" in label
+            ):
+                continue
+            if value.count("@") > 1:  # 判据 4：多人清单考的是照抄，不是找词
+                continue
+            hit = _term_value_of(value)  # 判据 1 + 3（整个值就是术语，且 4~30 字）
+            if hit is None:
+                continue
+            family, core = hit
+            if not index.is_unique(core):  # 判据 2
+                continue
+            if kp_normalize(label) not in norm_text:
+                continue
+            if (d["doc_id"], core) in seen:
+                continue  # 两种分隔符可能命中同一个字段行
+            seen.add((d["doc_id"], core))
+            out.append(
+                {
+                    "doc_id": d["doc_id"],
+                    "title": d["title"],
+                    "cat": "_".join(d["title"].split("_")[:2]),
+                    "name": name,
+                    "label": label,
+                    "value": value,
+                    "core": core,
+                    "family": family,
+                }
+            )
+    return out
+
+
+def _term_items(
+    cands: list[dict], limit: int, exclude: set[tuple[str, str]]
+) -> tuple[list[GoldItem], dict]:
+    """按术语类别轮转取题：同 doc 1 条、同 label ≤2 条、同一文档大类 ≤limit//4 条。
+
+    类别上限是人工读第二轮时加的：那时 20 条里 8 条落在候选人材料（笔试文件名、联系电话），
+    label 各自没超 2 条，但整批题变成「会不会在简历里找一个字段」——term 弱项的结论
+    就不能往外推。顺序必须是确定性的：按 sha256(doc_id|label|value) 排，
+    同一份语料重跑逐字得到同一批题。
+    """
+    pools: dict[str, list[dict]] = {}
+    for c in cands:
+        if (c["doc_id"], c["core"]) in exclude:
+            continue
+        pools.setdefault(c["family"], []).append(c)
+    for pool in pools.values():
+        pool.sort(
+            key=lambda c: hashlib.sha256(
+                f"{c['doc_id']}|{c['label']}|{c['core']}".encode()
+            ).hexdigest()
+        )
+    cap_cat = max(3, limit // 4)
+    stats = {
+        "pool_by_family": {k: len(v) for k, v in sorted(pools.items())},
+        "max_per_doc_category": cap_cat,
+    }
+    items: list[GoldItem] = []
+    used_docs: set[str] = set()
+    used_labels: Counter = Counter()
+    used_cats: Counter = Counter()
+    order = sorted(pools)
+    while len(items) < limit and any(pools[f] for f in order):
+        for fam in order:
+            pool = pools[fam]
+            while pool and (
+                pool[0]["doc_id"] in used_docs
+                or used_labels[pool[0]["label"]] >= _TERM_MAX_PER_LABEL
+                or used_cats[pool[0]["cat"]] >= cap_cat
+            ):
+                pool.pop(0)
+            if not pool:
+                continue
+            c = pool.pop(0)
+            used_cats[c["cat"]] += 1
+            h = int(hashlib.sha256(c["core"].encode()).hexdigest()[:8], 16)
+            items.append(
+                GoldItem(
+                    id="",
+                    type="term",
+                    question=_TERM_TEMPLATES[h % len(_TERM_TEMPLATES)].format(
+                        name=c["name"], label=c["label"]
+                    ),
+                    expected_answer=f"{c['label']}：{c['value']}",
+                    must_contain=[c["core"]],
+                    source_doc_ids=[c["doc_id"]],
+                    refusable=False,
+                    source_title=c["title"],
+                    origin="programmatic_term",
+                )
+            )
+            used_docs.add(c["doc_id"])
+            used_labels[c["label"]] += 1
+            if len(items) >= limit:
+                break
+    return items, stats
+
+
+def term_property_violations(docs: list[dict], items: list[GoldItem]) -> list[str]:
+    """复检这批题还满不满足「唯一可核对的字段值」：值逐字在该篇、全库只此一篇、短名在正文。"""
+    by_id = {d["doc_id"]: d for d in docs}
+    texts = {d["doc_id"]: kp_normalize(d["text"]) for d in docs}
+    bad: list[str] = []
+    for item in items:
+        did = item.source_doc_ids[0] if item.source_doc_ids else ""
+        doc = by_id.get(did)
+        if not doc or not item.must_contain:
+            bad.append(f"{item.id}: gold 篇不在当前语料里")
+            continue
+        value = item.must_contain[0]
+        if value not in texts[did]:
+            bad.append(f"{item.id}: 值不在该篇正文（{value}）")
+        n_doc = sum(1 for t in texts.values() if value in t)
+        if n_doc != 1:
+            bad.append(f"{item.id}: 值在 {n_doc} 篇里出现，gold 不唯一")
+        name = _term_short_name(doc["title"])
+        if name not in item.question:
+            bad.append(f"{item.id}: 题面短名与标题末段不一致")
+        if kp_normalize(name) not in texts[did]:
+            bad.append(f"{item.id}: 题面短名不在正文里")
+    return bad
+
+
+def generate_term_extra(
+    parsed_dir: Path,
+    out_file: Path,
+    limit: int = 24,
+    exclude_file: Path | None = None,
+) -> dict:
+    """term 扩题：独立文件、零 LLM，与已发布 72 条并列报数而不混口径。"""
+    docs = _load_docs(parsed_dir)
+    index = _KeyPointIndex(docs)
+    cands = _term_candidates(docs, index)
+    exclude: set[tuple[str, str]] = set()
+    if exclude_file and exclude_file.exists():
+        for i in json.loads(exclude_file.read_text(encoding="utf-8"))["items"]:
+            for did in i.get("source_doc_ids") or []:
+                for kw in i.get("must_contain") or []:
+                    exclude.add((did, kp_normalize(kw)))
+    items, stats = _term_items(cands, limit, exclude)
+    for n, item in enumerate(items, start=1):
+        item.id = f"t{n:03d}"
+    violations = term_property_violations(docs, items)
+    meta_out = {
+        "gold_version": "term-extra-v1",
+        "corpus_dir": str(parsed_dir),
+        "count": len(items),
+        "type_distribution": dict(Counter(i.type for i in items)),
+        "property_violations": violations,
+        "candidates_label_value": len(cands),
+        **stats,
+        "excluded_against": str(exclude_file) if exclude_file else None,
+        "must_contain_note": (
+            "must_contain 只有值本身（不含字段名），且去掉 @/《》 装饰后逐字取自该篇；"
+            "已发布的 12 条 term 里有 5 条把字段名也列进了判据，那是更松的口径"
+        ),
+        "construction_note": (
+            "零 LLM 程序化 term 题：从「字段名：值」形状抽，值全库唯一、4~30 字、"
+            "题面短名逐字在该篇正文。与 gold.json 的 72 条并列报数，不合成一个数。"
+        ),
+    }
+    payload = {"meta": meta_out, "items": [i.model_dump() for i in items]}
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return meta_out

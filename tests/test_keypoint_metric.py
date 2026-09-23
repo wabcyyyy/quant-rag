@@ -220,7 +220,8 @@ def test_compare_puts_keypoints_on_its_own_track_without_length_artifact(tmp_pat
         metric="keypoint_hit_ratio",
     )
     assert report["track"] == "answer"
-    assert report["metric"] == "keypoint_hit_ratio"
+    # 旧名照样能跑（PLAN/README 里的复现命令不失效），但报告里印的是标准名
+    assert report["metric"] == "keypoint_recall"
     paired = report["paired"][0]
     assert paired["mean_diff"] == pytest.approx(0.5)
     assert paired["warnings"] == [], f"块数不等不该在这个轨上报警：{paired['warnings']}"
@@ -305,9 +306,13 @@ def test_default_sweep_survives_files_lacking_the_new_metric(tmp_path):
         [{"label": "臂A", "files": [a]}, {"label": "臂B", "files": [b]}]
     )
     by_metric = {r["metric"]: r for r in reports}
-    assert by_metric["keypoint_hit_ratio"]["unscored"] is True
-    assert "未参与判读" in compare.format_report(by_metric["keypoint_hit_ratio"])
-    # 其余六个指标照旧判读，且不因为多了个空指标而被拉进 Holm 家族
+    assert by_metric["keypoint_recall"]["unscored"] is True
+    assert "未参与判读" in compare.format_report(by_metric["keypoint_recall"])
+    # 2026-09-21 新加的标准读数在同一批旧文件上同样是「未测」而不是 0：
+    # 它们要的是逐条 ranked 清单，而旧文件没落盘过这个字段。
+    for m in ("recall_at_5", "precision_at_5", "ndcg_at_5", "map_at_5"):
+        assert by_metric[m]["unscored"] is True, m
+    # 其余指标照旧判读，且不因为多了空指标而被拉进 Holm 家族
     assert by_metric["hit_at_5"]["unscored"] is False
     family = by_metric["hit_at_5"]["correction"]["family_size"]
     assert family == sum(1 for r in reports if not r["unscored"])

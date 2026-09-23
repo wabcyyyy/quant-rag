@@ -45,7 +45,7 @@ from ..orchestrator import Orchestrator
 from ..retrieve.hybrid import HybridRetriever
 from ..retrieve.rewrite_llm import endpoint_model
 from .judge import judge_cfg
-from .schema import GoldItem
+from .schema import LEGACY_SUMMARY_KEYS, GoldItem
 
 # 「答全」的门槛：命中 ≥ 80% 的要点。这个数是**拍的**，没有校准过——所以它只做展示
 # 分档，不进任何门禁；能被当作结论的是 `keypoint_hit_ratio` 本身。
@@ -66,6 +66,10 @@ _REFUSAL_MARKERS = [
     "未讨论",
 ]
 _CITATION_RE = re.compile(r"\[(\d+)\]")
+
+#: 标准 IR 读数的**唯一截断**。选 5 的理由见 `_rank_metrics` 的 docstring
+#: （LLM 只读 6 块；@8 里有两三格模型没看过；@10 在 8 格清单上是假数据点）。
+_STD_K = 5
 
 
 def _norm(s: str) -> str:
@@ -96,6 +100,43 @@ def _build_orchestrator(cfg: dict, collection: str | None):
 
 def _refusal_ok(answer: str) -> bool:
     return any(marker in answer for marker in _REFUSAL_MARKERS)
+
+
+def _rank_metrics(got_ids: list[str], gold: set[str], k: int = _STD_K) -> dict:
+    """业界标准读数的**唯一计算处**：Recall@k、Precision@k、AP@k（k 固定 = 5）。
+
+    为什么以前只能报 Hit@k：逐条只存了「首命中位次」，而 Recall@k 需要前 k 个槽位里
+    **命中了几篇**——首命中一个数答不了「gold 有 56 篇时前 5 位捞回几篇」。当年
+    `recall_at_k` 被改名成 `hit_at_k` 就是因为名字说了假话（护栏在
+    `tests/test_eval_metric_definitions.py` 第 1 条）；这一份是真的 Recall，
+    代价是 `retrieved_doc_ids` 必须逐条落盘，否则事后重算不出来。
+
+    **为什么 K 只取 5 而不做扫描**：一个截断一套数，读的人不必再猜哪列对哪列。
+    5 也是这条链路上唯一有意义的标准点——LLM 实际只读 6 块（`rerank.top_n`），
+    @8 里有 2~3 格模型根本没看过。曾经扫过 1/3/5/10，其中 **@10 是假数据点**：
+    清单只有 8 格，`recall_at_10` 在 64/64 条上逐字等于整条清单的召回，
+    看起来像一个独立测量点其实不是。k 超过清单长度的读数一律不出。
+
+    **precision 的分母是 k，不是清单条数**：早期版本写的是「命中的不同文档数 ÷ 块数」，
+    分子按文档、分母按块，单位不一致，于是单文档题的满分只有 1/8 = 0.125——
+    那个数读起来像质量差，其实是量纲错。现在与 recall 同用**去重后的文档排名**。
+    """
+    if not gold:
+        return {}
+    ranked = list(dict.fromkeys(got_ids))  # 去重保序：同一篇的第二个块不再占位
+    top = ranked[:k]
+    hits = len(set(top) & gold)
+    num = 0.0
+    seen = 0
+    for i, doc_id in enumerate(top, start=1):
+        if doc_id in gold:
+            seen += 1
+            num += seen / i
+    return {
+        f"recall_at_{k}": round(hits / len(gold), 4),
+        f"precision_at_{k}": round(hits / k, 4),
+        f"ap_at_{k}": round(num / min(len(gold), k), 4),
+    }
 
 
 def _contains_as_subsequence(keyword: str, answer: str) -> bool:
@@ -280,6 +321,9 @@ def evaluate(
         # 0.143 就是满分。不把这个数一起报出来，0.18 与 0.96 都会被读成同一回事。
         coverage_ceiling = min(len(gold), len(results)) / len(gold) if gold else None
         ndcg = _ndcg_at_k(got_ids, gold, k=8) if gold else None
+        # 与标准族同截断的 nDCG（@8 是已发布基线，保留；@5 才和上面那三个数同 k）
+        ndcg_std = _ndcg_at_k(got_ids, gold, k=_STD_K) if gold else None
+        rank_std = _rank_metrics(got_ids, gold)
 
         synth_meta = result.synth_meta
         answer = result.answer
@@ -375,6 +419,12 @@ def evaluate(
                     round(coverage_ceiling, 4) if coverage_ceiling is not None else None
                 ),
                 "ndcg_at_8": round(ndcg, 4) if ndcg is not None else None,
+                "ndcg_at_5": round(ndcg_std, 4) if ndcg_std is not None else None,
+                # 标准读数（Recall@5 / Precision@5 / AP@5）与 ** ranked 清单**：
+                # 没有后者，这些数事后重算不出来，而它们正是「Hit@k 之外还能不能说
+                # Recall」的前提。无 gold 的条目（no_answer）这里是 null。
+                "retrieved_doc_ids": list(dict.fromkeys(got_ids)),
+                **rank_std,
                 "n_source_docs": len(item.source_doc_ids),
                 # 清单与上下文的长度必须逐条可见：消融臂之间若清单不等长，
                 # hit/nDCG/覆盖率的差就部分是长度的函数（重排以前正是如此）。
@@ -433,6 +483,12 @@ def evaluate(
         for r in per_item
         if r["doc_coverage_ceiling"] is not None
     ]
+    # 整条清单口径的归一化召回（逐条比值取均值，**不是两个均值相除**）
+    rvc = [
+        r["doc_coverage"] / r["doc_coverage_ceiling"]
+        for r in per_item
+        if r.get("doc_coverage") is not None and r.get("doc_coverage_ceiling")
+    ]
 
     def _hit_rate(k: int | None) -> float | None:
         """首命中落在前 k 位的条目占比；`k=None` = 整条清单内任一位。
@@ -453,13 +509,22 @@ def evaluate(
 
         给 `no_answer`（按定义无 gold、覆盖率恒 None）编一个 0.0，就是把「未定义」
         印成「测出来是 0」——和那个恒真的 over_refusal 是同一类错误。
+        取值用 `.get()` 而不是 `[key]`：标准族那几个键在无 gold 的条目上是**整个
+        不存在**（`_rank_metrics` 返回空 dict），按 `[key]` 取会 KeyError 而不是跳过。
         """
         out: dict[str, float] = {}
         for t in sorted({r["type"] for r in per_item}):
-            vals = [r[key] for r in per_item if r["type"] == t and r[key] is not None]
+            vals = [
+                r[key] for r in per_item if r["type"] == t and r.get(key) is not None
+            ]
             if vals:
                 out[t] = round(sum(vals) / len(vals), 4)
         return out
+
+    def _macro_mean(key: str) -> float | None:
+        """有 gold 条目上的 macro 均值；该键缺失（旧文件）或全 None 时返回 None。"""
+        vals = [r[key] for r in with_source if r.get(key) is not None]
+        return round(sum(vals) / len(vals), 4) if vals else None
 
     scorable = [
         r
@@ -477,22 +542,40 @@ def evaluate(
     lens = [r["n_retrieved"] for r in per_item]
     summary = {
         "n_items": len(per_item),
+        # ↓ 标准名是主键。`hit_at_*` 保留这个名字是因为它**确实**是 Hit Rate@k
+        # （首命中在前 k 位），不是 Recall——这个区别当年被搞错过一次，护栏见
+        # `tests/test_eval_metric_definitions.py` 第 1 条。
         "hit_at_5": _hit_rate(5),
         "hit_at_8": _hit_rate(8),
-        "hit_within_budget": _hit_rate(None),
+        "hit_at_list": _hit_rate(None),
         "mrr": sum(mrr_scores) / len(with_source),
         # nDCG@8（二值相关，doc 去重）：整段排序质量，与 hit/mrr 同分母
         "ndcg_at_8": round(sum(ndcg_scores) / len(ndcg_scores), 4)
         if ndcg_scores
         else None,
-        # 逐条真 Recall（macro）。它必须和自己的上限一起读：清单 8 格、gold 56 篇
-        # 的那种条目，覆盖率上限就是 0.143。
-        "mean_doc_coverage": round(sum(covs) / len(covs), 4) if covs else None,
-        "coverage_ceiling_mean": round(sum(ceilings) / len(ceilings), 4)
+        # 逐条真 Recall（macro，整条清单口径）。它必须和自己的上限一起读：
+        # 清单 8 格、gold 56 篇的那种条目，上限 0.143 就是满分。
+        "recall_at_list_macro": round(sum(covs) / len(covs), 4) if covs else None,
+        "recall_ceiling_macro": round(sum(ceilings) / len(ceilings), 4)
         if ceilings
         else None,
-        "coverage_by_type": _mean_by_type("doc_coverage"),
-        "coverage_ceiling_by_type": _mean_by_type("doc_coverage_ceiling"),
+        "recall_by_type": _mean_by_type("doc_coverage"),
+        "recall_ceiling_by_type": _mean_by_type("doc_coverage_ceiling"),
+        # ↓ 标准族：**同一个截断 K=5** 的一套数（@8 那几列是已发布基线，原样保留）。
+        # 与 `hit_at_*` 的区别是「捞回几篇 / 几格相关」而不是「捞回没捞回」。
+        "recall_at_5": _macro_mean("recall_at_5"),
+        "precision_at_5": _macro_mean("precision_at_5"),
+        "ndcg_at_5": _macro_mean("ndcg_at_5"),
+        "map_at_5": _macro_mean("ap_at_5"),
+        # 分题型是这套数唯一有讲相法的地方：单文档题的 Precision@5 = 0.2 是
+        # 「5 格里 1 格相关」的教科书值，而 cross_doc 的 0.95 说明槽位几乎没浪费
+        # ——两个 0.2 与 0.95 混在全量均值里，谁也看不见谁。
+        "recall_at_5_by_type": _mean_by_type("recall_at_5"),
+        "precision_at_5_by_type": _mean_by_type("precision_at_5"),
+        # 归一化召回。K=5 窗口版不另列：#gold ≥ 5 时它与 Precision@5 是同一个数，
+        # 列两遍只会让人以为是两件事。它必须与 Recall 并排读——cross_doc 的 gold
+        # 中位 37 篇，5 格的天花板只有 0.135，裸读 Recall@5 会把检索判成失败。
+        "recall_vs_ceiling_macro": round(sum(rvc) / len(rvc), 4) if rvc else None,
         # 两臂可比性的自证：清单长度必须逐条落盘，不然「有重排」臂悄悄短一截
         "list_len": {
             "retrieved_min": min(lens) if lens else None,
@@ -500,22 +583,22 @@ def evaluate(
             "contexts_min": min((r["n_contexts"] for r in per_item), default=None),
             "contexts_max": max((r["n_contexts"] for r in per_item), default=None),
         },
-        "contains_acc": _safe_div(
+        "strict_keyword_accuracy": _safe_div(
             sum(1 for r in scorable if r["answered_ok"]), len(scorable)
         ),
         # 字符子序列口径（见 `_contains_as_subsequence`）：与严格值一起看，差值即度量
         # 口径的松紧。2026-09-19 全量实测两者**同值**（都 0.8438）→ 这一路当前不提供信息，
         # 留着是因为它能证伪「严格口径在惩罚措辞改写」，不是因为它是独立信号。
-        "contains_acc_subseq": _safe_div(
+        "subseq_keyword_accuracy": _safe_div(
             sum(1 for r in scorable if r["answered_ok_subseq"]), len(scorable)
         ),
         # 聚合题的分档命中（macro，只看有 key_points 的条目）。它是纯字符串判据，
         # 不受清单/上下文块数影响 → 上下文预算消融（E2）两臂块数不等时，这是唯一
         # 不用先扣除长度伪影的答案级读数。
-        "keypoint_hit_mean": _safe_div(
+        "keypoint_recall_macro": _safe_div(
             sum(r["keypoint_hit"] for r in kp_rows), len(kp_rows)
         ),
-        "keypoint_hit_by_type": _mean_by_type("keypoint_hit"),
+        "keypoint_recall_by_type": _mean_by_type("keypoint_hit"),
         "keypoint_n_items": len(kp_rows),
         "keypoint_k": {
             "min": min(ks) if ks else None,
@@ -533,8 +616,13 @@ def evaluate(
             sum(1 for r in per_item if r["over_refusal_gold"]),
             sum(1 for r in per_item if r["over_refusal_gold"] is not None),
         ),
+        # 分母只算**真判过**的拒答题：`--retrieval-only` 下八条拒答题的 answered_ok
+        # 全是 None，用 len(refusables) 当分母会把「没测」印成 0.0——正是本文件
+        # 已经禁止过两次的那类错误（coverage_by_type 不给 no_answer 编 0.0、
+        # over_refusal 的 None 不参与）。
         "refusal_acc": _safe_div(
-            sum(1 for r in refusables if r["answered_ok"]), len(refusables)
+            sum(1 for r in refusables if r["answered_ok"]),
+            sum(1 for r in refusables if r["answered_ok"] is not None),
         ),
         "citation_valid_rate": _safe_div(
             sum(1 for r in cites if r["citation_valid"]), len(cites)
@@ -545,6 +633,11 @@ def evaluate(
             sum(1 for r in per_item if r["citation_present"] is not None),
         ),
     }
+    # 旧名从标准名派生（见 `schema.LEGACY_SUMMARY_KEYS`）：外部脚本与历史工具还能读旧键，
+    # 而两个名字永远同值——写两遍才会漂移，派生不会。
+    for _legacy, _canonical in LEGACY_SUMMARY_KEYS.items():
+        if _canonical in summary:
+            summary[_legacy] = summary[_canonical]
     latency = _latency_summary(per_item)
     if latency:
         summary["latency"] = latency

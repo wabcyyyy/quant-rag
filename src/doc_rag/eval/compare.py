@@ -38,35 +38,68 @@ from pathlib import Path
 SUPPORTED_RAGAS = ("faithfulness", "answer_relevancy")
 
 #: 目标轨（逐条分数从 `items[]` 派生、判分不依赖 LLM）可选的指标。
-#: 里面混着两个层级，所以不叫「检索轨」：前七个是**检索级**，后两个是**答案级**
-#: （它们读的是答案文本，只是和检索级一样躺在 `items[]` 里、走同一套配对判读）。
+#: 里面混着两个层级，所以不叫「检索轨」：前面是**检索级**，`answered_ok` 与
+#: `keypoint_recall` 是**答案级**（读的是答案文本，只是同样躺在 `items[]` 里、
+#: 走同一套配对判读）。
+#:
+#: 名字一律用 IR 的标准读法。三条不是随便挑的：
+#: - `hit_at_*` 不叫 `recall_at_*`：它量的是「首命中在前 k 位」，gold 有 56 篇时
+#:   在 8 个槽位上报 Recall 是自欺（当年真叫错过一次，护栏在
+#:   `tests/test_eval_metric_definitions.py` 第 1 条）。真正的 Recall@k 由下面
+#:   `recall_at_k` 承担——它需要逐条 ranked 清单，2026-09-21 起才落盘。
+#: - `recall_at_list` = 整条清单上的文档召回（旧名 `mean_doc_coverage`）。
+#: - `recall_vs_ceiling` = 召回 ÷ 本可召回；`#清单 ≤ #gold` 时它在数值上就是
+#:   Precision@清单，但 `#gold < #清单` 时退化成召回本身——**分段指标**，所以不叫
+#:   precision，precision 另有其人（`precision_at_5`）。
+#:
+#: 标准族只用**一个截断 K=5**（`hit_at_5`/`recall_at_5`/`precision_at_5`/
+#: `ndcg_at_5`/`map_at_5`）。曾经扫过 1/3/5/10，其中 @10 在 8 格清单上是假数据点
+#: （逐条等于整条清单的召回），删。@8 那两列保留是因为它们是已发布基线。
 RETRIEVAL_METRICS = (
     "hit_at_5",
     "hit_at_8",
-    "hit_within_budget",
+    "hit_at_list",
     "mrr",
+    "ndcg_at_5",
     "ndcg_at_8",
-    "mean_doc_coverage",
-    "coverage_vs_ceiling",
+    "recall_at_5",
+    "recall_at_list",
+    "recall_vs_ceiling",
+    "precision_at_5",
+    "map_at_5",
     "answered_ok",
-    "keypoint_hit_ratio",
+    "keypoint_recall",
 )
+
+#: 旧名 → 标准名。`--metric` 与历史结果文件都走这里回落，所以 PLAN/README 里
+#: 已经写下的复现命令（`--metric keypoint_hit_ratio` 等）不会因改名而失效。
+METRIC_ALIASES = {
+    "hit_within_budget": "hit_at_list",
+    "mean_doc_coverage": "recall_at_list",
+    "coverage_vs_ceiling": "recall_vs_ceiling",
+    "keypoint_hit_ratio": "keypoint_recall",
+}
 
 #: 答案级的那两个：判据是字符串匹配，但读数随答案变，所以块数/清单长度是**实验变量**
 #: 而不是伪影（见 `_length_warnings` 的 answer 分支）。
-ANSWER_METRICS = ("answered_ok", "keypoint_hit_ratio")
-_KEYPOINT_METRIC = "keypoint_hit_ratio"
+ANSWER_METRICS = ("answered_ok", "keypoint_recall")
+_KEYPOINT_METRIC = "keypoint_recall"
 
-#: `compare-retrieval` 默认一次跑齐的指标族（`hit_within_budget` 要看清单末再单独点）。
-#: 两个答案级指标也在族内：它们只在有判据的条目上有值（聚合题 17 条 / 可答题 64 条），
-#: n 更小，但与其余指标同属一次运行、一起进 Holm 家族，所以只会更保守。
+#: `compare-retrieval` 默认一次跑齐的指标族。答案级两个也在族内：它们只在有判据的
+#: 条目上有值，n 更小，但与其余指标同属一次运行、一起进 Holm 家族，所以只会更保守。
+#: 新增的标准读数一并进来：旧结果文件没有这些逐条字段 → 整臂 `unscored`、
+#: 自动排除出家族（见 `compare_retrieval`），不会把「没测」稀释成「测了且是零」。
 RETRIEVAL_SWEEP = (
     "hit_at_5",
     "hit_at_8",
     "mrr",
+    "ndcg_at_5",
     "ndcg_at_8",
-    "mean_doc_coverage",
-    "coverage_vs_ceiling",
+    "recall_at_5",
+    "recall_at_list",
+    "recall_vs_ceiling",
+    "precision_at_5",
+    "map_at_5",
     "answered_ok",
     _KEYPOINT_METRIC,
 )
@@ -100,21 +133,30 @@ def _retrieval_value(metric: str, row: dict) -> float | None:
     if row.get("doc_coverage") is None:
         return None
     rank = row.get("first_hit_rank")
+    if metric == "hit_at_list":
+        return 1.0 if rank else 0.0
     if metric.startswith("hit_at_"):
         k = int(metric.removeprefix("hit_at_"))
         return 1.0 if rank and rank <= k else 0.0
-    if metric == "hit_within_budget":
-        return 1.0 if rank else 0.0
     if metric == "mrr":
         return 1.0 / rank if rank else 0.0
     if metric == "ndcg_at_8":
         value = row.get("ndcg_at_8")
         return None if value is None else float(value)
-    if metric == "mean_doc_coverage":
+    if metric == "recall_at_list":
         return float(row["doc_coverage"])
-    if metric == "coverage_vs_ceiling":
+    if metric == "recall_vs_ceiling":
         ceiling = row.get("doc_coverage_ceiling")
         return None if not ceiling else float(row["doc_coverage"]) / float(ceiling)
+    # ↓ 2026-09-21 起 runner 才逐条落盘的标准读数（同一截断 K=5）。旧结果文件没有
+    #   这些键 → 返回 None，配对时落进「两臂都无值」，整臂无值则由 compare_retrieval
+    #   标 `unscored` 排除出 Holm 家族——不把「没测」读成 0。
+    #   这里用**白名单**而不是前缀匹配：`recall_at_list` 也以 `recall_at_` 开头，
+    #   但它读的是 `doc_coverage`，前缀匹配会把它抢走。
+    if metric in ("recall_at_5", "precision_at_5", "ndcg_at_5", "map_at_5"):
+        stored = "ap_at_5" if metric == "map_at_5" else metric
+        value = row.get(stored)
+        return None if value is None else float(value)
     raise ValueError(
         f"未知检索轨指标：{metric}（可选：{', '.join(RETRIEVAL_METRICS)}）"
     )
@@ -165,6 +207,10 @@ def load_scores(path: str | Path, metric: str | None = None) -> dict:
     """
     p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))
+    # 旧名回落成标准名：PLAN/README 里已经写下的复现命令（`--metric
+    # keypoint_hit_ratio`、`coverage_vs_ceiling`）不因改名失效。
+    if metric:
+        metric = METRIC_ALIASES.get(metric, metric)
     if metric in RETRIEVAL_METRICS:
         return _load_retrieval(p, data, metric)
 

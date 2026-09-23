@@ -13,6 +13,21 @@ from pydantic import BaseModel, Field
 # `\-` 的 markdown 转义），把它们从匹配口径里剔掉后 A 救回 2 条、25 块臂救回 5 条。
 # 所以这不是假想敌：判据短语本身仍存原文（保 grounding），只在**比较**时去装饰。
 _KP_STRIP_CHARS = "@_\\*"
+
+#: 结果文件 summary 的「旧键 → 标准键」映射。放在 schema 而不是 runner，是因为
+#: eval 直跑与离线重判（`scripts/rescore_keypoints.py`）都要写同一批键：两处各写
+#: 一遍就会漂移，所以名字表和被判分侧共用的 `kp_normalize` 住在一起。
+LEGACY_SUMMARY_KEYS = {
+    "mean_doc_coverage": "recall_at_list_macro",
+    "coverage_ceiling_mean": "recall_ceiling_macro",
+    "coverage_by_type": "recall_by_type",
+    "coverage_ceiling_by_type": "recall_ceiling_by_type",
+    "hit_within_budget": "hit_at_list",
+    "contains_acc": "strict_keyword_accuracy",
+    "contains_acc_subseq": "subseq_keyword_accuracy",
+    "keypoint_hit_mean": "keypoint_recall_macro",
+    "keypoint_hit_by_type": "keypoint_recall_by_type",
+}
 _KP_WHITESPACE = re.compile(r"\s+")
 
 

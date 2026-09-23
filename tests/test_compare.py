@@ -427,3 +427,41 @@ def test_multiple_arms_can_take_a_significant_result_away(tmp_path):
         assert paired["p_holm"] == pytest.approx(0.0625)
         assert paired["significant_holm"] is False
     assert "校正后不显著" in format_report(reports[0])
+
+
+def test_cli_accepts_legacy_metric_names_and_dedupes(tmp_path):
+    """改名之后旧命令必须照样能跑，且同一指标被两个名字点两次只算一次比较。
+
+    这条是被自己的回归逼出来的：别名回落在 `load_scores` 里做，而 CLI 在更早一步
+    就按 `RETRIEVAL_METRICS` 校验 `--metric` → 旧名被直接拒。库层测试全绿拦不住它，
+    因为它们绕过了那道校验。PLAN/README 里写下的复现命令是文档的一部分，不能失效。
+    """
+    from typer.testing import CliRunner
+
+    from doc_rag import cli as cli_mod
+
+    f = _write_ret(tmp_path, "a.json", _ROWS)
+    g = _write_ret(tmp_path, "b.json", _ROWS)
+    res = CliRunner().invoke(
+        cli_mod.app,
+        [
+            "compare-retrieval",
+            "--group",
+            f"A={f}",
+            "--group",
+            f"B={g}",
+            "--metric",
+            "mean_doc_coverage",  # 旧名
+            "--metric",
+            "recall_at_list",  # 同一个指标的标准名
+            "--metric",
+            "coverage_vs_ceiling",  # 另一个旧名
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    assert "指标：recall_at_list" in res.output
+    assert "指标：recall_vs_ceiling" in res.output
+    # 旧名与新名指向同一个指标 → 只能占一格，否则 Holm 家族被同一指标占两次，
+    # 白白收紧其余指标的 α
+    assert res.output.count("指标：recall_at_list") == 1
+    assert "mean_doc_coverage" not in res.output
