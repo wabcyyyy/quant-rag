@@ -64,9 +64,13 @@ def ensure_collection(
 
 
 def _embed_text(chunk: Chunk) -> str:
-    """section_path 拼进向量输入，提升同质语料的区分度。"""
-    prefix = " / ".join(chunk.section_path)
-    return f"{prefix}\n{chunk.text}" if prefix else chunk.text
+    """向量输入 = 被索引文本（section_path 前缀 + 正文）。
+
+    A3.2 之后它与 BM25 分词文本同源（`Chunk.indexed_text` 是唯一实现）——
+    两路必须看到同一批词，否则「dense 配得上、BM25 没见过」的定位词（q019）
+    会在融合时把其中一路变成噪声。
+    """
+    return chunk.indexed_text()
 
 
 def collection_doc_ids(client: QdrantClient, name: str) -> dict[str, int]:
@@ -270,7 +274,10 @@ def index_parsed(
                         vector={
                             "dense": vector,
                             "bm25": models.Document(
-                                text=build_bm25_text(chunk.text), model="qdrant/bm25"
+                                # 与 dense 同一份被索引文本（A3.2 对称）：正文 +
+                                # section_path 前缀，jieba 预分词在 build_bm25_text
+                                text=build_bm25_text(_embed_text(chunk)),
+                                model="qdrant/bm25",
                             ),
                         },
                         payload={k: v for k, v in payload.items() if v is not None},

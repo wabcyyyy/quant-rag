@@ -47,3 +47,15 @@ class Chunk(BaseModel):
     section_path: list[str] = Field(default_factory=list)
     page: int | None = None
     block_type: str = "paragraph"
+
+    def indexed_text(self) -> str:
+        """被索引文本：section_path 前缀 + 正文，dense 与 BM25 共用的同一份。
+
+        为什么必须在 schema 层给唯一实现（A3.2，q019 类缺陷的修复）：改前 dense
+        的向量输入带 section_path 前缀，BM25 分词文本却是纯正文——「2025年第36周」
+        「议题5」这类只出现在标题/路径里的定位词在 dense 可配、在 BM25 零出现，
+        两路看到的是不同的索引。前缀组合逻辑只写在这一处，两个调用方引用它，
+        「同一 chunk 的 dense 前缀词集合 ⊆ BM25 词集合」由构造保证。
+        """
+        prefix = " / ".join(self.section_path)
+        return f"{prefix}\n{self.text}" if prefix else self.text

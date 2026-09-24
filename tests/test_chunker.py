@@ -128,3 +128,50 @@ def test_interior_heading_semantics_unchanged():
     paths = [c.section_path for c in chunks if c.block_type != "heading"]
     assert ["议题A"] == paths[0]
     assert ["议题A", "议题B"] == paths[-1]
+
+
+# ── A3.2：dense 与 BM25 的被索引文本对称（q019 类缺陷的修复）────────────────
+
+
+def _doc_with_path(blocks):
+    return IntermediateDoc(
+        meta=SourceMeta(source_type="docx", doc_id="t2"), blocks=blocks
+    )
+
+
+def test_bm25_text_contains_the_dense_prefix():
+    """同一 chunk 的 dense 前缀词集合 ⊆ BM25 词集合（构造上同源）。
+
+    「2025年第36周」「议题5」这类只出现在标题里的定位词，改前只进 dense 的
+    section_path 前缀，BM25 分词文本（纯正文）没有——两路看到的索引不同。
+    """
+    from doc_rag.ingest.bm25 import build_bm25_text
+
+    doc = _doc_with_path(
+        [
+            Block(type="heading", heading_level=2, text="2025年第36周 议题5"),
+            Block(type="paragraph", text="正文：动议区表决通过。"),
+        ]
+    )
+    for chunk in chunk_document(doc):
+        dense_text = chunk.indexed_text()
+        bm25_text = build_bm25_text(dense_text)
+        # 前缀的所有非空白字符都在 BM25 文本里（jieba 只切分、不丢字）
+        prefix = " / ".join(chunk.section_path)
+        assert _norm_str(prefix) in _norm_str(bm25_text)
+
+
+def _norm_str(s: str) -> str:
+    import re
+
+    return re.sub(r"\s+", "", s)
+
+
+def test_embed_text_and_bm25_share_one_composition():
+    """indexer._embed_text 与 BM25 的输入必须逐字同源（唯一实现）。"""
+    import inspect
+
+    from doc_rag.ingest import indexer
+
+    source = inspect.getsource(indexer)
+    assert "build_bm25_text(_embed_text(chunk))" in source

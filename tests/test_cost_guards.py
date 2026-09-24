@@ -427,7 +427,15 @@ def index_env(tmp_path, monkeypatch):
         indexer,
         "chunk_by",
         lambda strategy, doc: [
-            Mock(chunk_id="c", section_path=[], text="t", page=1, block_type="p")
+            # indexed_text：A3.2 后 chunker 产物统一暴露该方法（dense/BM25 同源输入）
+            Mock(
+                chunk_id="c",
+                section_path=[],
+                text="t",
+                page=1,
+                block_type="p",
+                indexed_text=lambda: "t",
+            )
         ],
     )
     monkeypatch.setattr(indexer, "build_bm25_text", lambda t: t)
