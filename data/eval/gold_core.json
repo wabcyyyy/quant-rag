@@ -1,0 +1,1589 @@
+{
+  "meta": {
+    "gold_version": "gold_core",
+    "sample": true,
+    "note": "核心集：消融全臂跑这一档。全部内容虚构（与 data/sample_raw 同源的合成语料），由 scripts/make_gold_from_corpus.py 程序化派生（零 LLM）。判据与语料同源：must_contain/key_points 均为正文逐字子串，脚本自检逐字命中后落盘。字段契约见 src/doc_rag/eval/schema.py。",
+    "count": 74,
+    "type_distribution": {
+      "fact": 12,
+      "decision": 10,
+      "open_discussion": 8,
+      "term": 5,
+      "cross_doc": 15,
+      "time_filter": 16,
+      "no_answer": 8
+    }
+  },
+  "items": [
+    {
+      "id": "c001",
+      "type": "fact",
+      "question": "《会议档案_专题会_2025-11-06-会议纪要》中差旅意外保险预算明细表里「设备购置」的金额是多少？",
+      "expected_answer": "差旅意外保险的预算为 197 万元。",
+      "must_contain": [
+        "设备购置",
+        "197 万元"
+      ],
+      "source_doc_ids": [
+        "3ecdd843a3effae0"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_专题会_2025-11-06-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c002",
+      "type": "fact",
+      "question": "《会议档案_专题会_2026-09-01-会议纪要》中园区门禁升级预算明细表里「设备购置」的金额是多少？",
+      "expected_answer": "园区门禁升级的预算为 285 万元。",
+      "must_contain": [
+        "设备购置",
+        "285 万元"
+      ],
+      "source_doc_ids": [
+        "a35f395762bd14d7"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_专题会_2026-09-01-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c003",
+      "type": "fact",
+      "question": "《会议档案_专题会_2025-12-24-会议纪要》中呼叫中心排班优化的预算是多少？",
+      "expected_answer": "呼叫中心排班优化的预算为 33 万元。",
+      "must_contain": [
+        "33 万元"
+      ],
+      "source_doc_ids": [
+        "f017e411c3beb795"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_专题会_2025-12-24-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c004",
+      "type": "fact",
+      "question": "《会议档案_办公会_2025-09-12-会议纪要》中档案室数字化的预算是多少？",
+      "expected_answer": "档案室数字化的预算为 39 万元。",
+      "must_contain": [
+        "39 万元"
+      ],
+      "source_doc_ids": [
+        "52fed73c9a4f12b4"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025-09-12-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c005",
+      "type": "fact",
+      "question": "《会议档案_办公会_2025-07-10-会议纪要》中办公用品集采的预算是多少？",
+      "expected_answer": "办公用品集采的预算为 80 万元。",
+      "must_contain": [
+        "80 万元"
+      ],
+      "source_doc_ids": [
+        "dbc4cf47e3c49faf"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025-07-10-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c006",
+      "type": "fact",
+      "question": "《会议档案_办公会_2026-03-18-会议纪要》中测试环境整理的预算是多少？",
+      "expected_answer": "测试环境整理的预算为 闲置测试服务器清点后统一。",
+      "must_contain": [
+        "闲置测试服务器清点后统一"
+      ],
+      "source_doc_ids": [
+        "cb6ca8fd762f55f6"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026-03-18-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c007",
+      "type": "fact",
+      "question": "《会议档案_专题会_2026-07-21-会议纪要》中知识产权培训的预算是多少？",
+      "expected_answer": "知识产权培训的预算为 15 万元。",
+      "must_contain": [
+        "15 万元"
+      ],
+      "source_doc_ids": [
+        "285dce9f8a71a181"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_专题会_2026-07-21-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c008",
+      "type": "fact",
+      "question": "《会议档案_办公会_2026-06-01-会议纪要》中增值税发票自查的预算是多少？",
+      "expected_answer": "增值税发票自查的预算为 83 万元。",
+      "must_contain": [
+        "83 万元"
+      ],
+      "source_doc_ids": [
+        "ded28bf0fe11259b"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026-06-01-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c009",
+      "type": "fact",
+      "question": "《会议档案_办公会_2026-07-01-会议纪要》中售后热线扩容的预算是多少？",
+      "expected_answer": "售后热线扩容的预算为 92 万元。",
+      "must_contain": [
+        "92 万元"
+      ],
+      "source_doc_ids": [
+        "93200e936598f9d5"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026-07-01-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c010",
+      "type": "fact",
+      "question": "《会议档案_办公会_2026-08-25-会议纪要》中行业展会展台的预算是多少？",
+      "expected_answer": "行业展会展台的预算为 61 万元。",
+      "must_contain": [
+        "61 万元"
+      ],
+      "source_doc_ids": [
+        "7d9429642054c31b"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026-08-25-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c011",
+      "type": "fact",
+      "question": "《会议档案_办公会_2025-09-22-会议纪要》中差旅意外保险的预算是多少？",
+      "expected_answer": "差旅意外保险的预算为 27 万元。",
+      "must_contain": [
+        "27 万元"
+      ],
+      "source_doc_ids": [
+        "7ae3e95598e1d225"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025-09-22-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c012",
+      "type": "fact",
+      "question": "《会议档案_办公会_会议纪要_2025-07-29》中样机管理制度的预算是多少？",
+      "expected_answer": "样机管理制度的预算为 174 万元。",
+      "must_contain": [
+        "174 万元"
+      ],
+      "source_doc_ids": [
+        "66d1c2a78d80e565"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_会议纪要_2025-07-29",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c013",
+      "type": "decision",
+      "question": "关于年度健康体检，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 275 万元。",
+      "must_contain": [
+        "275 万元"
+      ],
+      "source_doc_ids": [
+        "bfe1ca9778199535"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年28周-会议纪要_2025-07-10",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c014",
+      "type": "decision",
+      "question": "关于海外仓调研，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 47 万元。",
+      "must_contain": [
+        "47 万元"
+      ],
+      "source_doc_ids": [
+        "041715c3b2ae75af"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第48周-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c015",
+      "type": "decision",
+      "question": "关于年度健康体检，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 21 万元。",
+      "must_contain": [
+        "21 万元"
+      ],
+      "source_doc_ids": [
+        "61fa797040ced2b3"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026-05-29-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c016",
+      "type": "decision",
+      "question": "关于电子邮件归档策略，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 225 万元。",
+      "must_contain": [
+        "225 万元"
+      ],
+      "source_doc_ids": [
+        "7886f05bb895f61c"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_会议纪要_2025-11-11",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c017",
+      "type": "decision",
+      "question": "关于年度健康体检，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 8。",
+      "must_contain": [
+        "8"
+      ],
+      "source_doc_ids": [
+        "9df2af43427646bf"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_专题会_2025-07-16-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c018",
+      "type": "decision",
+      "question": "关于月度考勤公示，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 339 万元。",
+      "must_contain": [
+        "339 万元"
+      ],
+      "source_doc_ids": [
+        "9f04d11291c44afd"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第5周-会议纪要_2026-01-27",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c019",
+      "type": "decision",
+      "question": "关于档案室数字化，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 32 万元。",
+      "must_contain": [
+        "32 万元"
+      ],
+      "source_doc_ids": [
+        "33bf4b05799a002b"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_专题会_2025-09-16-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c020",
+      "type": "decision",
+      "question": "关于固定资产盘点，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 707 台。",
+      "must_contain": [
+        "707 台"
+      ],
+      "source_doc_ids": [
+        "34dd0956b7f30557"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年10周-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c021",
+      "type": "decision",
+      "question": "关于图书角建设，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 266 万元。",
+      "must_contain": [
+        "266 万元"
+      ],
+      "source_doc_ids": [
+        "4d08a1bcbb93205d"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年14周-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c022",
+      "type": "decision",
+      "question": "关于物流月度对账，会议定下了什么安排？",
+      "expected_answer": "会议同意按方案推进，预算 169 万元。",
+      "must_contain": [
+        "169 万元"
+      ],
+      "source_doc_ids": [
+        "a3adef63d9712010"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年40周-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c023",
+      "type": "open_discussion",
+      "question": "关于机房空调维保，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "e990b830420f13c7"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_会议纪要_2026-05-14",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c024",
+      "type": "open_discussion",
+      "question": "关于知识产权培训，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "028c693e655a803c"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年16周-会议纪要_2026-04-17",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c025",
+      "type": "open_discussion",
+      "question": "关于电子邮件归档策略，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "9ec4da2a35daa7ca"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年50周-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c026",
+      "type": "open_discussion",
+      "question": "关于员工宿舍改造，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "2679e243bf2bef02"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年41周-会议纪要_2026-10-07",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c027",
+      "type": "open_discussion",
+      "question": "关于会议室预约系统，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "565e4db0fdf82754"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第46周-会议纪要_2025-11-10",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c028",
+      "type": "open_discussion",
+      "question": "关于知识产权培训，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "aab428973c2e5387"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_会议纪要_2025-09-24",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c029",
+      "type": "open_discussion",
+      "question": "关于供应商实地走访，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "10e83075018354b2"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第34周-会议纪要_2025-08-22",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c030",
+      "type": "open_discussion",
+      "question": "关于工牌重新制发，会议讨论出结论了吗？",
+      "expected_answer": "未形成决议，待补充材料后提交下次会议再议。",
+      "must_contain": [
+        "未形成决议"
+      ],
+      "source_doc_ids": [
+        "3da31781a798962c"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第13周-会议纪要",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c031",
+      "type": "term",
+      "question": "公司内部把仓储系统称作什么代号？",
+      "expected_answer": "内部代号「犀牛系统」。",
+      "must_contain": [
+        "犀牛系统"
+      ],
+      "source_doc_ids": [
+        "9ffd1a0b3f340323",
+        "215530573387f1a8",
+        "51056875b4767fba",
+        "6ae0d08478d5bb96",
+        "132043afc226bf16"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c032",
+      "type": "term",
+      "question": "公司内部把会议室预约系统称作什么代号？",
+      "expected_answer": "内部代号「鹊桥系统」。",
+      "must_contain": [
+        "鹊桥系统"
+      ],
+      "source_doc_ids": [
+        "565e4db0fdf82754",
+        "ee134fbf6a9fcd4f",
+        "239c93b37776bdfd",
+        "c884280cc32e688b",
+        "ed3f9f4b6bc0b90d"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c033",
+      "type": "term",
+      "question": "公司内部把客服系统称作什么代号？",
+      "expected_answer": "内部代号「海豚平台」。",
+      "must_contain": [
+        "海豚平台"
+      ],
+      "source_doc_ids": [
+        "d53cdae786ba29bf",
+        "23afb10ba0761552",
+        "6b0636a73dd36a21",
+        "89cbee9b77ad26d4",
+        "066fa1014f813d45"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c034",
+      "type": "term",
+      "question": "公司内部把经营数据看板称作什么代号？",
+      "expected_answer": "内部代号「灯塔看板」。",
+      "must_contain": [
+        "灯塔看板"
+      ],
+      "source_doc_ids": [
+        "31180e3e885ad3f5",
+        "d2fda8cc1c545966",
+        "82c8d5bd593cd39d",
+        "ed4f13c0ac2813d6",
+        "c1c8b9a58046f75e"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c035",
+      "type": "term",
+      "question": "公司内部把财务系统称作什么代号？",
+      "expected_answer": "内部代号「天平系统」。",
+      "must_contain": [
+        "天平系统"
+      ],
+      "source_doc_ids": [
+        "6562a1671dcd9896",
+        "2485f5cf74b7f1f1",
+        "2ea9fc606564853b",
+        "d3f37395da12b3a3",
+        "17a2104adff997c9"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c036",
+      "type": "cross_doc",
+      "question": "公司会议上关于年度健康体检都讨论过哪些内容？",
+      "expected_answer": "不同周次的会议分别汇报过年度健康体检的进展与安排。",
+      "must_contain": [
+        "年度健康体检"
+      ],
+      "source_doc_ids": [
+        "9df2af43427646bf",
+        "bfe1ca9778199535",
+        "99a1992e5cb91c7d",
+        "00908fe6dcc0df13",
+        "9db7ef99445dc233",
+        "404ec81460ba06e6",
+        "61fa797040ced2b3",
+        "ad4dec37c56e4a40",
+        "2d020d60927bcb0c",
+        "e2a04b836b2ac7d9",
+        "b44861c95c380b58",
+        "d2a8211aef15300a",
+        "8efbf8c35ca29e11"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "9df2af43427646bf",
+          "phrase": "一、年度健康体检预算明细"
+        },
+        {
+          "doc_id": "bfe1ca9778199535",
+          "phrase": "信息技术部宋文平汇报，年度健康体检项目方案已具备执行条件，预算 275 万元，按现有人员分工推进，不新增编制"
+        },
+        {
+          "doc_id": "00908fe6dcc0df13",
+          "phrase": "行政部龚静杰汇报，年度健康体检项目方案已具备执行条件，预算 137 万元，按现有人员分工推进，不新增编制"
+        },
+        {
+          "doc_id": "9db7ef99445dc233",
+          "phrase": "财务部田雨明汇报，年度健康体检项目方案已具备执行条件，预算 154 万元，按现有人员分工推进，不新增编制"
+        },
+        {
+          "doc_id": "61fa797040ced2b3",
+          "phrase": "预算 21 万元，已完成供应商定标与合同签署"
+        },
+        {
+          "doc_id": "e2a04b836b2ac7d9",
+          "phrase": "采购部程建杰汇报，年度健康体检项目方案已具备执行条件，预算 9 万元，按现有人员分工推进，不新增编制"
+        },
+        {
+          "doc_id": "b44861c95c380b58",
+          "phrase": "市场部邹家平汇报，年度健康体检项目方案已具备执行条件，预算 295 万元，按现有人员分工推进，不新增编制"
+        },
+        {
+          "doc_id": "d2a8211aef15300a",
+          "phrase": "人力资源部雷浩明汇报，年度健康体检项目方案已具备执行条件，预算 249 万元，按现有人员分工推进，不新增编制"
+        }
+      ]
+    },
+    {
+      "id": "c037",
+      "type": "cross_doc",
+      "question": "关于供应商协同平台二期，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕供应商协同平台二期的历次推进与决议，汇报人均为张博华。",
+      "must_contain": [
+        "张博华"
+      ],
+      "source_doc_ids": [
+        "bd5e8452efdb5faa",
+        "f46b98869f364eb8",
+        "8556cd6481b5c122"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "bd5e8452efdb5faa",
+          "phrase": "与会人员对覆盖范围意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "f46b98869f364eb8",
+          "phrase": "采购部张博华汇报，一期遗留问题已全部闭环"
+        },
+        {
+          "doc_id": "8556cd6481b5c122",
+          "phrase": "采购部张博华汇报，经复核上线时间存在较大偏差，此前通过的原方案停止执行，按修订方案重新立项，预算调整为 150 万元"
+        }
+      ]
+    },
+    {
+      "id": "c038",
+      "type": "cross_doc",
+      "question": "关于员工通勤班车，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕员工通勤班车的历次推进与决议，汇报人均为杨俊雪。",
+      "must_contain": [
+        "杨俊雪"
+      ],
+      "source_doc_ids": [
+        "29aa8c52b95e21d9",
+        "7b3b0c6b36bb0913",
+        "e830b2637bc6da01"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "29aa8c52b95e21d9",
+          "phrase": "行政部杨俊雪汇报，阶段目标按计划完成，关键节点无延期"
+        },
+        {
+          "doc_id": "7b3b0c6b36bb0913",
+          "phrase": "行政部杨俊雪汇报，供应商报价已收齐三份，价差在 8% 以内，整体符合预期"
+        },
+        {
+          "doc_id": "e830b2637bc6da01",
+          "phrase": "行政部杨俊雪汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c039",
+      "type": "cross_doc",
+      "question": "关于售后备件中心，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕售后备件中心的历次推进与决议，汇报人均为黄晨华。",
+      "must_contain": [
+        "黄晨华"
+      ],
+      "source_doc_ids": [
+        "552346a2aa87d7ab",
+        "7239a46f12bc6186",
+        "8a360b98419e9bc3",
+        "968b6630c3ac1eb9"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "552346a2aa87d7ab",
+          "phrase": "运营部黄晨华汇报，试点范围扩大到两个区域，反馈正向"
+        },
+        {
+          "doc_id": "7239a46f12bc6186",
+          "phrase": "运营部黄晨华汇报，一期遗留问题已全部闭环，整体符合预期"
+        },
+        {
+          "doc_id": "8a360b98419e9bc3",
+          "phrase": "运营部黄晨华汇报，联调测试通过率达到 97%，整体符合预期"
+        },
+        {
+          "doc_id": "968b6630c3ac1eb9",
+          "phrase": "运营部黄晨华汇报，阶段目标按计划完成，关键节点无延期，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c040",
+      "type": "cross_doc",
+      "question": "关于园区能耗监控改造，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕园区能耗监控改造的历次推进与决议，汇报人均为周晓杰。",
+      "must_contain": [
+        "周晓杰"
+      ],
+      "source_doc_ids": [
+        "b8447c44e669f705",
+        "fc597019024f3af8",
+        "2b6bf11bc54dfd81"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "b8447c44e669f705",
+          "phrase": "与会人员对人员编制意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "fc597019024f3af8",
+          "phrase": "行政部周晓杰汇报，联调测试通过率达到 97%"
+        },
+        {
+          "doc_id": "2b6bf11bc54dfd81",
+          "phrase": "行政部周晓杰汇报，经复核验收标准存在较大偏差，此前通过的原方案停止执行，按修订方案重新立项，预算调整为 110 万元"
+        }
+      ]
+    },
+    {
+      "id": "c041",
+      "type": "cross_doc",
+      "question": "关于固定资产盘点，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕固定资产盘点的历次推进与决议，汇报人均为孙国丽。",
+      "must_contain": [
+        "孙国丽"
+      ],
+      "source_doc_ids": [
+        "bb8f71927e03f318",
+        "34dd0956b7f30557",
+        "d36942511e659b66",
+        "51403b53d4a47e95"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "bb8f71927e03f318",
+          "phrase": "财务部孙国丽汇报，供应商报价已收齐三份，价差在 8% 以内"
+        },
+        {
+          "doc_id": "34dd0956b7f30557",
+          "phrase": "财务部孙国丽汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        },
+        {
+          "doc_id": "d36942511e659b66",
+          "phrase": "财务部孙国丽汇报，一期遗留问题已全部闭环，整体符合预期"
+        },
+        {
+          "doc_id": "51403b53d4a47e95",
+          "phrase": "财务部孙国丽汇报，联调测试通过率达到 97%，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c042",
+      "type": "cross_doc",
+      "question": "关于实习生转正计划，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕实习生转正计划的历次推进与决议，汇报人均为徐泽雪。",
+      "must_contain": [
+        "徐泽雪"
+      ],
+      "source_doc_ids": [
+        "39d9f7e4e7044113",
+        "ec4ada57d34326cc",
+        "7b3bc285e6aaed3a"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "39d9f7e4e7044113",
+          "phrase": "与会人员对验收标准意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "ec4ada57d34326cc",
+          "phrase": "人力资源部徐泽雪汇报，供应商报价已收齐三份，价差在 8% 以内"
+        },
+        {
+          "doc_id": "7b3bc285e6aaed3a",
+          "phrase": "人力资源部徐泽雪汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c043",
+      "type": "cross_doc",
+      "question": "关于客户满意度回访机制，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕客户满意度回访机制的历次推进与决议，汇报人均为马佳华。",
+      "must_contain": [
+        "马佳华"
+      ],
+      "source_doc_ids": [
+        "b2745cdd5d323503",
+        "fb7cc8c5ce2ff020",
+        "885792b0004fd916"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "b2745cdd5d323503",
+          "phrase": "与会人员对覆盖范围意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "fb7cc8c5ce2ff020",
+          "phrase": "质量与安全部马佳华汇报，一期遗留问题已全部闭环"
+        },
+        {
+          "doc_id": "885792b0004fd916",
+          "phrase": "质量与安全部马佳华汇报，联调测试通过率达到 97%，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c044",
+      "type": "cross_doc",
+      "question": "关于客服系统升级，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕客服系统升级的历次推进与决议，汇报人均为李雨丽。",
+      "must_contain": [
+        "李雨丽"
+      ],
+      "source_doc_ids": [
+        "a9d2a354185be7dd",
+        "6d961a80c0e41759",
+        "de3957c605ccedd4",
+        "db5b22de0b4ba84a"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "a9d2a354185be7dd",
+          "phrase": "客户成功部李雨丽汇报，供应商报价已收齐三份，价差在 8% 以内"
+        },
+        {
+          "doc_id": "6d961a80c0e41759",
+          "phrase": "客户成功部李雨丽汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        },
+        {
+          "doc_id": "de3957c605ccedd4",
+          "phrase": "客户成功部李雨丽汇报，一期遗留问题已全部闭环，整体符合预期"
+        },
+        {
+          "doc_id": "db5b22de0b4ba84a",
+          "phrase": "客户成功部李雨丽汇报，联调测试通过率达到 97%，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c045",
+      "type": "cross_doc",
+      "question": "关于新仓库建设，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕新仓库建设的历次推进与决议，汇报人均为王志雪。",
+      "must_contain": [
+        "王志雪"
+      ],
+      "source_doc_ids": [
+        "41e330a2122dc2e2",
+        "5a277a887cd08701",
+        "410bac4fed65dabb"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "41e330a2122dc2e2",
+          "phrase": "与会人员对验收标准意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "5a277a887cd08701",
+          "phrase": "供应链部王志雪汇报，供应商报价已收齐三份，价差在 8% 以内"
+        },
+        {
+          "doc_id": "410bac4fed65dabb",
+          "phrase": "供应链部王志雪汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c046",
+      "type": "cross_doc",
+      "question": "关于海外仓调研，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕海外仓调研的历次推进与决议，汇报人均为吴文霞。",
+      "must_contain": [
+        "吴文霞"
+      ],
+      "source_doc_ids": [
+        "20e9d65dadc40151",
+        "2e0a4fcb91826b1c",
+        "041715c3b2ae75af",
+        "b20dbde749049261",
+        "4d3bdf7d6b120e63"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "20e9d65dadc40151",
+          "phrase": "供应链部吴文霞汇报，联调测试通过率达到 97%"
+        },
+        {
+          "doc_id": "2e0a4fcb91826b1c",
+          "phrase": "供应链部吴文霞汇报，经复核验收标准存在较大偏差，此前通过的原方案停止执行，按修订方案重新立项，预算调整为 41 万元"
+        },
+        {
+          "doc_id": "041715c3b2ae75af",
+          "phrase": "供应链部吴文霞汇报，供应商报价已收齐三份，价差在 8% 以内"
+        },
+        {
+          "doc_id": "b20dbde749049261",
+          "phrase": "供应链部吴文霞汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        },
+        {
+          "doc_id": "4d3bdf7d6b120e63",
+          "phrase": "供应链部吴文霞汇报，一期遗留问题已全部闭环，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c047",
+      "type": "cross_doc",
+      "question": "关于灾备机房建设，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕灾备机房建设的历次推进与决议，汇报人均为刘铭杰。",
+      "must_contain": [
+        "刘铭杰"
+      ],
+      "source_doc_ids": [
+        "50351e472f0d2de0",
+        "c02332a845d565f4",
+        "cf1838e4f450a54b",
+        "1e4f0a5387bbb60f",
+        "b8e6126233ca86c0"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "50351e472f0d2de0",
+          "phrase": "信息技术部刘铭杰汇报，一期遗留问题已全部闭环"
+        },
+        {
+          "doc_id": "c02332a845d565f4",
+          "phrase": "信息技术部刘铭杰汇报，经复核上线时间存在较大偏差，此前通过的原方案停止执行，按修订方案重新立项，预算调整为 289 万元"
+        },
+        {
+          "doc_id": "cf1838e4f450a54b",
+          "phrase": "信息技术部刘铭杰汇报，阶段目标按计划完成，关键节点无延期"
+        },
+        {
+          "doc_id": "1e4f0a5387bbb60f",
+          "phrase": "信息技术部刘铭杰汇报，供应商报价已收齐三份，价差在 8% 以内，整体符合预期"
+        },
+        {
+          "doc_id": "b8e6126233ca86c0",
+          "phrase": "信息技术部刘铭杰汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c048",
+      "type": "cross_doc",
+      "question": "关于经营数据看板，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕经营数据看板的历次推进与决议，汇报人均为赵怡丽。",
+      "must_contain": [
+        "赵怡丽"
+      ],
+      "source_doc_ids": [
+        "d8c54534df9137a9",
+        "a4ea3d0e2eb85891",
+        "baf94459529710e1"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "d8c54534df9137a9",
+          "phrase": "与会人员对付款节奏意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "a4ea3d0e2eb85891",
+          "phrase": "信息技术部赵怡丽汇报，试点范围扩大到两个区域，反馈正向"
+        },
+        {
+          "doc_id": "baf94459529710e1",
+          "phrase": "信息技术部赵怡丽汇报，一期遗留问题已全部闭环，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c049",
+      "type": "cross_doc",
+      "question": "关于财务系统二期，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕财务系统二期的历次推进与决议，汇报人均为陈家霞。",
+      "must_contain": [
+        "陈家霞"
+      ],
+      "source_doc_ids": [
+        "9bc0f99ea6e952a4",
+        "8aace27bdb7184c8",
+        "adb9718bf90de314",
+        "d7ccf38e5ec52299"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "9bc0f99ea6e952a4",
+          "phrase": "与会人员对上线时间意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        },
+        {
+          "doc_id": "8aace27bdb7184c8",
+          "phrase": "财务部陈家霞汇报，阶段目标按计划完成，关键节点无延期"
+        },
+        {
+          "doc_id": "adb9718bf90de314",
+          "phrase": "财务部陈家霞汇报，供应商报价已收齐三份，价差在 8% 以内，整体符合预期"
+        },
+        {
+          "doc_id": "d7ccf38e5ec52299",
+          "phrase": "财务部陈家霞汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c050",
+      "type": "cross_doc",
+      "question": "关于采购合同模板修订，公司先后讨论并决定了哪些事情？",
+      "expected_answer": "围绕采购合同模板修订的历次推进与决议，汇报人均为朱静杰。",
+      "must_contain": [
+        "朱静杰"
+      ],
+      "source_doc_ids": [
+        "d9e193c9806e0d68",
+        "1e38b558e00309b9",
+        "0541b7a77b3b93d8",
+        "274f9037544b1482"
+      ],
+      "refusable": false,
+      "source_title": null,
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "d9e193c9806e0d68",
+          "phrase": "法务部朱静杰汇报，一期遗留问题已全部闭环"
+        },
+        {
+          "doc_id": "1e38b558e00309b9",
+          "phrase": "法务部朱静杰汇报，联调测试通过率达到 97%，整体符合预期"
+        },
+        {
+          "doc_id": "0541b7a77b3b93d8",
+          "phrase": "法务部朱静杰汇报，阶段目标按计划完成，关键节点无延期，整体符合预期"
+        },
+        {
+          "doc_id": "274f9037544b1482",
+          "phrase": "法务部朱静杰汇报，供应商报价已收齐三份，价差在 8% 以内，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c051",
+      "type": "no_answer",
+      "question": "公司在内幕信息方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c052",
+      "type": "no_answer",
+      "question": "公司在区块链方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c053",
+      "type": "no_answer",
+      "question": "公司在员工持股计划方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c054",
+      "type": "no_answer",
+      "question": "公司在存证方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c055",
+      "type": "no_answer",
+      "question": "公司在数字藏品方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c056",
+      "type": "no_answer",
+      "question": "公司在碳排放配额方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c057",
+      "type": "no_answer",
+      "question": "公司在责任保险方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c058",
+      "type": "no_answer",
+      "question": "公司在跨境数据传输方面有什么制度或安排？",
+      "expected_answer": "应拒答：现有文档没有讨论过该主题。",
+      "must_contain": [],
+      "source_doc_ids": [],
+      "refusable": true,
+      "source_title": "(全库不存在)",
+      "origin": "programmatic",
+      "key_points": []
+    },
+    {
+      "id": "c059",
+      "type": "time_filter",
+      "question": "2025 年关于供应商协同平台二期有哪些进展或安排？",
+      "expected_answer": "2025 年供应商协同平台二期由张博华汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "张博华",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "bd5e8452efdb5faa"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第44周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "bd5e8452efdb5faa",
+          "phrase": "与会人员对覆盖范围意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c060",
+      "type": "time_filter",
+      "question": "2025 年关于员工通勤班车有哪些进展或安排？",
+      "expected_answer": "2025 年员工通勤班车由杨俊雪汇报推进，预算 48 万元。",
+      "must_contain": [
+        "杨俊雪",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "29aa8c52b95e21d9"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年47周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "29aa8c52b95e21d9",
+          "phrase": "行政部杨俊雪汇报，阶段目标按计划完成，关键节点无延期"
+        }
+      ]
+    },
+    {
+      "id": "c061",
+      "type": "time_filter",
+      "question": "2025 年关于售后备件中心有哪些进展或安排？",
+      "expected_answer": "2025 年售后备件中心由黄晨华汇报推进，预算 157 万元。",
+      "must_contain": [
+        "黄晨华",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "552346a2aa87d7ab"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第30周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "552346a2aa87d7ab",
+          "phrase": "运营部黄晨华汇报，试点范围扩大到两个区域，反馈正向"
+        }
+      ]
+    },
+    {
+      "id": "c062",
+      "type": "time_filter",
+      "question": "2025 年关于园区能耗监控改造有哪些进展或安排？",
+      "expected_answer": "2025 年园区能耗监控改造由周晓杰汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "周晓杰",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "b8447c44e669f705"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第38周-会议纪要_2025-09-17",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "b8447c44e669f705",
+          "phrase": "与会人员对人员编制意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c063",
+      "type": "time_filter",
+      "question": "2025 年关于固定资产盘点有哪些进展或安排？",
+      "expected_answer": "2025 年固定资产盘点由孙国丽汇报推进，预算 640 台。",
+      "must_contain": [
+        "孙国丽",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "bb8f71927e03f318"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年51周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "bb8f71927e03f318",
+          "phrase": "财务部孙国丽汇报，供应商报价已收齐三份，价差在 8% 以内"
+        }
+      ]
+    },
+    {
+      "id": "c064",
+      "type": "time_filter",
+      "question": "2025 年关于实习生转正计划有哪些进展或安排？",
+      "expected_answer": "2025 年实习生转正计划由徐泽雪汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "徐泽雪",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "39d9f7e4e7044113"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第32周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "39d9f7e4e7044113",
+          "phrase": "与会人员对验收标准意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c065",
+      "type": "time_filter",
+      "question": "2025 年关于客户满意度回访机制有哪些进展或安排？",
+      "expected_answer": "2025 年客户满意度回访机制由马佳华汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "马佳华",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "b2745cdd5d323503"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第45周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "b2745cdd5d323503",
+          "phrase": "与会人员对覆盖范围意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c066",
+      "type": "time_filter",
+      "question": "2025 年关于客服系统升级有哪些进展或安排？",
+      "expected_answer": "2025 年客服系统升级由李雨丽汇报推进，预算 66 万元。",
+      "must_contain": [
+        "李雨丽",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "a9d2a354185be7dd"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第28周-会议纪要_2025-07-11",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "a9d2a354185be7dd",
+          "phrase": "客户成功部李雨丽汇报，供应商报价已收齐三份，价差在 8% 以内"
+        }
+      ]
+    },
+    {
+      "id": "c067",
+      "type": "time_filter",
+      "question": "2025 年关于新仓库建设有哪些进展或安排？",
+      "expected_answer": "2025 年新仓库建设由王志雪汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "王志雪",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "41e330a2122dc2e2"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年51周-会议纪要_2025-12-17",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "41e330a2122dc2e2",
+          "phrase": "与会人员对验收标准意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c068",
+      "type": "time_filter",
+      "question": "2025 年关于海外仓调研有哪些进展或安排？",
+      "expected_answer": "2025 年海外仓调研由吴文霞汇报推进，预算 35 万元。",
+      "must_contain": [
+        "吴文霞",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "20e9d65dadc40151"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第28周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "20e9d65dadc40151",
+          "phrase": "供应链部吴文霞汇报，联调测试通过率达到 97%"
+        }
+      ]
+    },
+    {
+      "id": "c069",
+      "type": "time_filter",
+      "question": "2025 年关于经营数据看板有哪些进展或安排？",
+      "expected_answer": "2025 年经营数据看板由赵怡丽汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "赵怡丽",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "d8c54534df9137a9"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年32周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "d8c54534df9137a9",
+          "phrase": "与会人员对付款节奏意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c070",
+      "type": "time_filter",
+      "question": "2025 年关于财务系统二期有哪些进展或安排？",
+      "expected_answer": "2025 年财务系统二期由陈家霞汇报推进，预算 未形成决议。",
+      "must_contain": [
+        "陈家霞",
+        "2025"
+      ],
+      "source_doc_ids": [
+        "9bc0f99ea6e952a4"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2025年第28周-会议纪要_2025-07-11",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "9bc0f99ea6e952a4",
+          "phrase": "与会人员对上线时间意见不一，本场议题未形成决议，要求相关部门补充测算后提交下次会议再议"
+        }
+      ]
+    },
+    {
+      "id": "c071",
+      "type": "time_filter",
+      "question": "2026 年关于供应商协同平台二期有哪些进展或安排？",
+      "expected_answer": "2026 年供应商协同平台二期由张博华汇报推进，预算 150 万元。",
+      "must_contain": [
+        "张博华",
+        "2026"
+      ],
+      "source_doc_ids": [
+        "8556cd6481b5c122"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年2周-会议纪要_2026-01-05",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "8556cd6481b5c122",
+          "phrase": "采购部张博华汇报，经复核上线时间存在较大偏差，此前通过的原方案停止执行，按修订方案重新立项，预算调整为 150 万元"
+        }
+      ]
+    },
+    {
+      "id": "c072",
+      "type": "time_filter",
+      "question": "2026 年关于员工通勤班车有哪些进展或安排？",
+      "expected_answer": "2026 年员工通勤班车由杨俊雪汇报推进，预算 62 万元。",
+      "must_contain": [
+        "杨俊雪",
+        "2026"
+      ],
+      "source_doc_ids": [
+        "e830b2637bc6da01"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第5周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "e830b2637bc6da01",
+          "phrase": "行政部杨俊雪汇报，试点范围扩大到两个区域，反馈正向，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c073",
+      "type": "time_filter",
+      "question": "2026 年关于售后备件中心有哪些进展或安排？",
+      "expected_answer": "2026 年售后备件中心由黄晨华汇报推进，预算 168 万元。",
+      "must_contain": [
+        "黄晨华",
+        "2026"
+      ],
+      "source_doc_ids": [
+        "7239a46f12bc6186"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年4周-会议纪要",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "7239a46f12bc6186",
+          "phrase": "运营部黄晨华汇报，一期遗留问题已全部闭环，整体符合预期"
+        }
+      ]
+    },
+    {
+      "id": "c074",
+      "type": "time_filter",
+      "question": "2026 年关于园区能耗监控改造有哪些进展或安排？",
+      "expected_answer": "2026 年园区能耗监控改造由周晓杰汇报推进，预算 99 万元。",
+      "must_contain": [
+        "周晓杰",
+        "2026"
+      ],
+      "source_doc_ids": [
+        "fc597019024f3af8"
+      ],
+      "refusable": false,
+      "source_title": "会议档案_办公会_2026年第14周-会议纪要_2026-04-01",
+      "origin": "programmatic",
+      "key_points": [
+        {
+          "doc_id": "fc597019024f3af8",
+          "phrase": "行政部周晓杰汇报，联调测试通过率达到 97%"
+        }
+      ]
+    }
+  ]
+}
