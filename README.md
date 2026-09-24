@@ -119,21 +119,28 @@ uv run doc-rag query --stream "问题"           # CLI 流式输出
 ## 示例语料（clone 即可端到端体验）
 
 真实语料不入库；`data/sample_raw/` 附带一套**虚构公司「云帆科技」的合成会议纪要**
-（10 篇 PDF，由 `scripts/make_sample_corpus.py` 确定性生成，内容与黄金集样例
-`golden_sample.json` 的 doc_id 互相咬合）：
+（2026-09-25 起为 **320 篇**：10 篇历史档 + 310 篇生成档，由
+`scripts/make_sample_corpus.py` 确定性生成，`--scale 10` 保留历史档且 doc_id 与
+`golden_sample.json` 互相咬合）。语料带着真实语料遇到的每一类结构难点的对应样本：
+周次命名 201 篇（含「2026年42周」无「第」的回归用例与第 53 周钳制）、跨文档同议题
+系列 51 篇（决议状态演化：讨论→已决→推翻→重申）、带框表格 8、长纪要（8~15 页）12、
+碎化 PDF 4（每字符一行）、近空扫描件 4（无文本层，OCR 兜底对象）；`doc_date` 覆盖
+100%，聚合题判据用的归属人名全库唯一。配套公开黄金集（`scripts/make_gold_from_corpus.py`
+从语料事实清单程序化派生，零 LLM）：`gold_core.json` 74 条（消融全臂跑这档）与
+`gold_full.json` 198 条（只跑冻结配置）。
 
 ```bash
-uv run doc-rag ingest  --raw-dir data/sample_raw --parsed-dir data/sample_parsed \
-                       --kb doc_rag_sample --recreate
-uv run doc-rag eval    --kb doc_rag_sample --gold data/eval/golden_sample.json \
-                       --rewrite --rerank --fresh-answers
+uv run python scripts/make_sample_corpus.py --scale 300   # 重新生成（确定性，sha256 幂等）
+uv run doc-rag ingest  --raw-dir data/sample_raw --parsed-dir data/sample_parsed                        --kb doc_rag_sample --recreate
+uv run doc-rag eval    --kb doc_rag_sample --gold data/eval/gold_core.json                        --retrieval-only --rerank          # 零成本检索侧读数
+uv run doc-rag eval    --kb doc_rag_sample --gold data/eval/golden_sample.json                        --rewrite --rerank --fresh-answers # 10 条端到端冒烟
 uv run --extra demo doc-rag demo --kb doc_rag_sample   # 演示页连示例库
 ```
 
-实测（10 条全真实调用，成本 ≈¥0.02）：Hit@k/MRR/nDCG、包含匹配、拒答、引用全部 1.0，
-端到端 p95 ≈4~5s。注意：**10 篇小库满分只背书「管线正确、eval 判分口径可跑通」**，
-真实语料上的难度与结论看下方黄金集 v2 各节；`--parsed-dir` 让示例解析产物与公司语料
-目录隔离，避免把全量中间 JSON 误灌进示例 collection。
+检索侧基线（74 条 gold_core）与三臂消融的分阶段读数见 PLAN §5.7 与 ADR-0004
+（Hit@5 0.89~0.94 区间；答案侧基线留待冻结后一次性采）。注意：**10 篇小库满分只背书
+「管线正确、eval 判分口径可跑通」**；`--parsed-dir` 让示例解析产物与公司语料目录隔离，
+避免把全量中间 JSON 误灌进示例 collection。
 
 ## 外部基准（RGB 中文子集，可独立复核）
 
