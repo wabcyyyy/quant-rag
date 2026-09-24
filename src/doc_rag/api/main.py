@@ -130,6 +130,10 @@ def _record(result, *, endpoint: str) -> None:
         # 两段式（ADR-0002）：map 失败率超阈值整题退回单发。不计数就没人知道
         # 这条答案其实是单发口径出的。
         metrics.inc("doc_rag_synthesis_fallback_total")
+    if getattr(result, "retrieval_empty", False):
+        # B3 拒答归因：检索为空 = 「索引挂了/语料没进来」，不是「文档真没记载」。
+        # 这条计数非零就是事故信号——正确的无据拒答必须发生在有检索产出的前提上。
+        metrics.inc("doc_rag_empty_retrieval_total")
     trace = result.trace
     if trace:
         # agent 层的四条：开了几步、停在哪、花了多少、有多少「停」其实是判定挂了。
@@ -193,6 +197,8 @@ def query(body: QueryIn) -> dict:
         "answer": result.answer,
         "citations": result.citations,
         "rerank_error": result.rerank_error,
+        # B3 拒答归因：true = 这条「无法回答」来自空检索（事故），不是文档没记载
+        "retrieval_empty": result.retrieval_empty,
         # 延迟口径（PLAN「延迟口径」）：synth_cached 为真时 synthesize 是缓存查询
         # 耗时而非模型延迟，客户端据此决定要不要信这个数
         "latency_ms": result.latency_ms,

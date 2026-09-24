@@ -67,6 +67,10 @@ class Result:
     summaries: list[dict] | None = None
     # map 段自己的开销（并行微摘要的墙钟与篇数/退化数）。单发路径恒为 None。
     map_meta: dict | None = None
+    # 检索是否为空（B3 拒答归因）：True = 「索引挂了/语料没进来」，False = 检索有产出。
+    # 没有这个字段，「检索为空导致的拒答」与「文档真没记载的正确拒答」在结果里
+    # 长得一模一样——前者是事故，后者是被测行为，必须可区分。
+    retrieval_empty: bool = False
 
 
 def _ms(a: float, b: float) -> float:
@@ -83,6 +87,37 @@ def _rerank_requested(cfg: dict, use_rerank: bool | None) -> bool:
     if use_rerank is None:
         return bool((cfg.get("rerank") or {}).get("enabled"))
     return bool(use_rerank)
+
+
+def _entries(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """检索结果行 → (contexts, citations)。
+
+    为什么是模块级而不是 `_prepare` 里的闭包：`answer_given_contexts`（外部基准
+    那种「文档由数据集提供」的协议）必须与检索路径产出**形状逐字相同**的
+    contexts/citations——否则引用编号 `[n]` 的含义会在两条路径上分叉，而被引用的
+    是同一份 LLM 输出。
+    """
+    ctxs = [
+        {
+            "no": i + 1,
+            "text": r["text"],
+            "doc": r["title"] or r["doc_id"],
+            "page": r["page"],
+            "doc_id": r["doc_id"],
+        }
+        for i, r in enumerate(rows)
+    ]
+    cites = [
+        {
+            "no": c["no"],
+            "doc": c["doc"],
+            "page": c["page"],
+            "doc_id": r["doc_id"],
+            "block_type": r.get("block_type"),
+        }
+        for c, r in zip(ctxs, rows)
+    ]
+    return ctxs, cites
 
 
 class Orchestrator:
@@ -129,6 +164,17 @@ class Orchestrator:
         # 合成器逐调用新建：它的 last_meta 是可变属性，复用会让并发请求互相读到
         # 对方的计时（假延迟）。eval 走注入路径，顺序执行下复用同一个实例。
         return retriever, synthesizer_mod.Synthesizer(self.cfg["llm"])
+
+    def _synthesizer(self) -> Any:
+        """只取合成器，不建 Qdrant 客户端与嵌入器。
+
+        单独成一个方法而不是走 `_parts`：后者在生产路径下会顺手建连接与嵌入器，
+        而给定上下文的入口（`answer_given_contexts`）根本不检索，不该为它付一次
+        连接与一次模型装配。注入路径仍返回注入的那个实例，语义与 `_parts` 一致。
+        """
+        if self._injected_synthesizer is not None:
+            return self._injected_synthesizer
+        return synthesizer_mod.Synthesizer(self.cfg["llm"])
 
     @property
     def retriever(self) -> Any:
@@ -276,29 +322,6 @@ class Orchestrator:
             budgets = normal_budgets
         capped = results[: min(budgets)] if budgets else list(results)
 
-        def _entries(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-            ctxs = [
-                {
-                    "no": i + 1,
-                    "text": r["text"],
-                    "doc": r["title"] or r["doc_id"],
-                    "page": r["page"],
-                    "doc_id": r["doc_id"],
-                }
-                for i, r in enumerate(rows)
-            ]
-            cites = [
-                {
-                    "no": c["no"],
-                    "doc": c["doc"],
-                    "page": c["page"],
-                    "doc_id": r["doc_id"],
-                    "block_type": r.get("block_type"),
-                }
-                for c, r in zip(ctxs, rows)
-            ]
-            return ctxs, cites
-
         contexts, citations = _entries(capped)
         summaries: list[dict] | None = None
         map_meta: dict | None = None
@@ -335,6 +358,7 @@ class Orchestrator:
             synthesis_route=route,
             summaries=summaries,
             map_meta=map_meta,
+            retrieval_empty=not results,
         )
         marks = {
             "t0": t0,
@@ -451,6 +475,85 @@ class Orchestrator:
         # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta
         candidate = getattr(synthesizer, "last_meta", None)
         result.synth_meta = candidate if isinstance(candidate, dict) else None
+        result.latency_ms = self._latency(marks, result.synth_meta, answered=True)
+        return result
+
+    def answer_given_contexts(
+        self,
+        question: str,
+        docs: list[str],
+        *,
+        require_citation: bool = True,
+        question_type: str | None = None,
+        doc_names: list[str] | None = None,
+    ) -> Result:
+        """给定上下文的问答：跳过改写/检索/重排，直接合成。
+
+        存在理由：外部基准（RGB）是**给文档**的协议——文档由数据集提供，检索层不
+        参与。此前没有这条路径，评测脚本只能自己在 Orchestrator 之外拼 contexts 再
+        调 Synthesizer，那正是「同一条链在多处内联重复并漂移」的复发条件。这里与
+        检索路径共用同一份 `_entries` 与同一个 Synthesizer，所以引用编号 `[n]`、
+        上下文渲染格式、思考档查表在两条路径上逐字同源——`tests/test_orchestrator_parity.py`
+        用同 contexts 对照把这件事钉住。
+
+        `question_type` 是**预测题型**（生产里来自 `agent.predict_type(plan)`），只用来
+        查思考档。本入口不经过改写、拿不到计划，所以由调用方给出；基准按数据集自带的
+        任务标签填（聚合类的题因此走生产的「聚合关思考」档）——这是一处**声明过的
+        偏差**，不是静默改动，见 docs/guides/benchmark-rgb.md。
+
+        `doc_names` 缺省按「文档1..n」编号：基准语料没有标题，而生产路径的
+        `format_context` 一定给每块带一个 `（doc 第p页）` 前缀，不能省。
+        """
+        names = (
+            list(doc_names)
+            if doc_names is not None
+            else [f"文档{i + 1}" for i in range(len(docs))]
+        )
+        if len(names) != len(docs):
+            raise ValueError(
+                f"doc_names 与 docs 数量不一致：{len(names)} vs {len(docs)}"
+            )
+        rows = [
+            {
+                "text": text,
+                "title": name,
+                # doc_id 参与 citations 与落盘、不参与 prompt：固定前缀是为了让
+                # 「这条引用来自给定上下文而不是检索」在结果文件里可自证。
+                "doc_id": f"given-{i + 1:04d}",
+                "page": None,
+                "block_type": "paragraph",
+            }
+            for i, (name, text) in enumerate(zip(names, docs, strict=True))
+        ]
+        contexts, citations = _entries(rows)
+        synthesizer = self._synthesizer()
+        t0 = time.perf_counter()
+        result = Result(
+            plan={
+                "rewritten": question,
+                "filters": None,
+                "aggregate": False,
+                "top_n": None,
+                "reason": "给定上下文，未改写",
+                "degraded": False,
+            },
+            # `retrieved` 是**检索**的结果；本入口没有检索，留空而不是填 contexts。
+            # 填了会让「检索指标算在未截断清单上」这条口径在这条路径上变成假的。
+            retrieved=[],
+            contexts=contexts,
+            citations=citations,
+            context_budget=len(contexts),
+        )
+        result.answer = synthesizer.answer(
+            question,
+            contexts,
+            require_citation=require_citation,
+            question_type=question_type,
+        )
+        # 必须是 dict——Mock 的自动属性会造出一个不可序列化的假 meta（同 answer）
+        candidate = getattr(synthesizer, "last_meta", None)
+        result.synth_meta = candidate if isinstance(candidate, dict) else None
+        marks = {"t0": t0, "t_rewrite": t0, "t_retrieve": t0, "t_rerank": t0}
         result.latency_ms = self._latency(marks, result.synth_meta, answered=True)
         return result
 

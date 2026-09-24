@@ -456,6 +456,9 @@ def evaluate(
                 "filter_fallback": result.filter_fallback,
                 "answered_ok": answered_ok,
                 "answered_ok_subseq": answered_ok_subseq,
+                # B3 拒答归因：检索为空的「拒答」是事故（索引挂了），不是被测行为；
+                # 与「有检索产出但文档真没记载」的正确拒答必须可区分
+                "retrieval_empty": result.retrieval_empty,
                 # 分档判据：`n_key_points` 必须逐条落盘，否则两臂的 K 是不是同一个
                 # 分母只能靠回忆（和 `n_retrieved` 同一条理由）。
                 "keypoint_hit": keypoint_hit,
@@ -566,7 +569,9 @@ def evaluate(
         "hit_at_5": _hit_rate(5),
         "hit_at_8": _hit_rate(8),
         "hit_at_list": _hit_rate(None),
-        "mrr": sum(mrr_scores) / len(with_source),
+        # 全拒答黄金集（holdout 常态）下 with_source 为空：mrr 是「未定义」，
+        # 不是 0——除零即把「没测」印成「测了且全错」，本项目明令禁止
+        "mrr": round(sum(mrr_scores) / len(with_source), 4) if with_source else None,
         # nDCG@8（二值相关，doc 去重）：整段排序质量，与 hit/mrr 同分母
         "ndcg_at_8": round(sum(ndcg_scores) / len(ndcg_scores), 4)
         if ndcg_scores
@@ -650,6 +655,9 @@ def evaluate(
             sum(1 for r in per_item if r["citation_present"]),
             sum(1 for r in per_item if r["citation_present"] is not None),
         ),
+        # B3 拒答归因：空检索条数。>0 = 有条目的「无法回答」来自索引/语料事故
+        # 而不是文档真没记载——这类条目不该混进任何质量结论的分母里被无视
+        "empty_retrieval_n": sum(1 for r in per_item if r.get("retrieval_empty")),
     }
     # 旧名从标准名派生（见 `schema.LEGACY_SUMMARY_KEYS`）：外部脚本与历史工具还能读旧键，
     # 而两个名字永远同值——写两遍才会漂移，派生不会。
