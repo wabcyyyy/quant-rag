@@ -393,6 +393,72 @@ def test_every_entry_sends_identical_prompt(monkeypatch, tmp_path, wired):
         assert len(_CTX_HEAD.findall(user)) == MAX_CONTEXTS, entry
 
 
+# ── 第六条入口：给定上下文（外部基准用）────────────────────────────────
+
+GIVEN_DOCS: tuple[str, ...] = tuple(f"正文{i}" for i in range(MAX_CONTEXTS))
+
+
+class _GivenRowsRetriever:
+    """返回与 `answer_given_contexts` **完全同形**的行：title=文档n、page=None。
+
+    对照的前提是两条路径拿到的 contexts 逐字相同，所以这里手工把行拼成 `_entries`
+    对给定文档的产出形状，而不是复用 `SpyRetriever`——后者带 `page=i`，渲染出来会
+    多一个「第i页」，那就不是在比同一批上下文了。
+    """
+
+    collection = "kb_default"
+
+    def __init__(self, docs: list[str]) -> None:
+        self.docs = docs
+        self.cfg: dict = {}
+
+    def retrieve(self, question, **kw):
+        chunks = [
+            {
+                "doc_id": f"given-{i + 1:04d}",
+                "title": f"文档{i + 1}",
+                "page": None,
+                "text": text,
+                "block_type": "paragraph",
+                "score": 1.0 - i / 100,
+            }
+            for i, text in enumerate(self.docs)
+        ]
+        return RetrievalOutcome(chunks=chunks)
+
+
+def test_given_contexts_entry_shares_the_same_prompt(monkeypatch, wired):
+    """给定上下文的入口不得自己拼 contexts——它必须与检索路径逐字同源。
+
+    RGB 这类外部基准是「把文档直接给你」的协议，不经过检索。如果那条路径自己拼
+    prompt，它就是第六条会漂移的入口，也就是本文件开头记的那次事故（端点漏掉重排
+    与截断）的复发条件。这里让两条路径在**同一批上下文**上对照：送进 LLM 的
+    system 与 user prompt 必须逐字相同。
+    """
+    cfg = _cfg()
+    Orchestrator(
+        cfg,
+        retriever=_GivenRowsRetriever(list(GIVEN_DOCS)),
+        synthesizer=Synthesizer(cfg["llm"]),
+    ).answer(QUESTION)
+    assert len(wired) == 1, "检索路径应且只应触发一次合成调用"
+    from_retrieval = wired[0]
+
+    orch = Orchestrator(cfg, synthesizer=Synthesizer(cfg["llm"]))
+    result = orch.answer_given_contexts(QUESTION, list(GIVEN_DOCS))
+    assert len(wired) == 2, "给定上下文入口应且只应触发一次合成调用"
+    from_given = wired[1]
+
+    assert from_given["system"] == from_retrieval["system"]
+    assert from_given["user"] == from_retrieval["user"]
+    assert len(_CTX_HEAD.findall(from_given["user"])) == len(GIVEN_DOCS)
+    # 引用编号与 contexts 一一对应，且 `retrieved` 留空（本入口没有检索；
+    # 填成 contexts 会让「检索指标算在未截断清单上」这条口径变成假的）
+    assert [c["no"] for c in result.citations] == list(range(1, len(GIVEN_DOCS) + 1))
+    assert result.retrieved == []
+    assert result.context_budget == len(GIVEN_DOCS)
+
+
 # ── mode 维度：agent 臂下五条入口同样要逐项相等 ─────────────────────────
 
 # 两步停：先判「不够 + 再查子查询二」，再判「够了」。判决序列脚本化是 mock 下能
