@@ -1730,6 +1730,23 @@ ADR-0003（维持已关闭，无需改）。
 阶段读数表，答案侧基线由下一轮 Phase C 在冻结后的新底座上一次性重建。A3.1~A3.3 同样
 改变索引，作废范围并入本声明。
 
+### A4 聚合题上下文预算：入口与拍板规则（本轮不跑扫线）
+
+- **入口**：`bash scripts/agg_budget_sweep.sh`——7 臂 6/8/10/12/15/20/25，每臂
+  `--top-n N --max-contexts N`（**方法学坑写死在脚本头**：只动 `--max-contexts` 是
+  半个杠杆，进 LLM 的块数 = min(max_contexts, rerank.top_n)，清单 8 格时 25 会被截
+  在 8——E2 臂 B 已证伪过一次）。输出 `data/eval/agg_sweep_<N>.json`，判读走
+  `compare-retrieval --metric keypoint_hit_ratio`。冒烟已过（`--limit 1
+  --retrieval-only`，¥0；shellcheck 本机未装，`bash -n` 语法检查通过）。
+- **拍板规则（先于看数写定，下一轮照此执行，后看数）**：
+  选「**聚合端到端 p95 ≤5s 约束下 `keypoint_recall` 最高的那档**」——
+  延迟取 `--fresh-answers` 口径、retrieve 分项 >1s 的条目按上游污染剔除
+  （照 ADR-0002 的延迟判读口径）；若最优点仍是 6，则维持 6 并把曲线留档，
+  **「不换默认」同样是合格结论**。拍板后新默认写进 `configs/default.yaml`
+  并按 §6.2 声明作废范围（L1：只作废答案侧）。
+- **聚合题子集已标记**：`data/eval/gold_core_agg.json`（31 条 = cross_doc 15 +
+  time_filter 16，keypoints K n=31 / min 1 / mean 2.42），扫线直接消费。
+
 
 
 
