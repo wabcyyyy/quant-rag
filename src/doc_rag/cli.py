@@ -986,6 +986,13 @@ def evaluate(
             "（噪声地板），主口径取第一遍；repeat_runs[] 保留每遍逐条"
         ),
     ] = 1,
+    holdout: Annotated[
+        bool,
+        typer.Option(
+            help="B9/U1：评估外部 holdout（origin=external）——meta.holdout=true，"
+            "结果与调参集可溯源区分；判分走人工 rubric 不是自动指标"
+        ),
+    ] = False,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -1117,6 +1124,7 @@ def evaluate(
             ragas_sample=ragas_sample,
             use_judge_cache=not fresh_judge,
             judge_over=judge_over,
+            holdout=holdout,
         )
         span = results["summary"].get("repeat_span") or {}
         typer.echo(
@@ -1145,6 +1153,7 @@ def evaluate(
             judge_over=judge_over,
             resume_from=resume,
             progress_file=out_file,
+            holdout=holdout,
         )
     s = results["summary"]
     typer.echo(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import typing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,7 +116,7 @@ def test_eval_meta_carries_fingerprints(tmp_path, monkeypatch):
 
     class _Retriever:
         collection = "t"
-        cfg = {"mode": "hybrid"}
+        cfg: typing.ClassVar = {"mode": "hybrid"}
 
     class _Orch:
         def __init__(self, *a, **kw):

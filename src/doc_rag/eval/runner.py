@@ -329,6 +329,7 @@ def evaluate(
     judge_over: dict | None = None,
     resume_from: Path | str | None = None,
     progress_file: Path | None = None,
+    holdout: bool = False,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -915,6 +916,8 @@ def evaluate(
             "index_fp": current_index_fp,
             "synth_fp": current_synth_fp,
             "freeze_warnings": freeze_warns,
+            # B9/U1：外部 holdout 的结果与调参集可溯源地区分（冻结后永不进调参集）
+            "holdout": holdout,
             # 让结果文件自证身份：延迟数字曾因「不知道是哪个模型、缓存开没开」
             # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
             "llm_model": llm_section.get("model"),
@@ -961,7 +964,7 @@ def evaluate_with_repeat(
     if repeat == 1:
         return first
     span: dict[str, float] = {}
-    for key, base in first["summary"].items():
+    for key in first["summary"]:
         vals = [r["summary"].get(key) for r in runs]
         nums = [
             float(v)

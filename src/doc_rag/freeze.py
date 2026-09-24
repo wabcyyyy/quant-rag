@@ -21,8 +21,11 @@ import subprocess
 from pathlib import Path
 
 from .config import project_root
+from .log import get_logger
 from .generate import prompts
 from .index_identity import identity_for
+
+_log = get_logger("freeze")
 
 _FREEZE_DIR = project_root() / ".cache"
 
@@ -106,7 +109,10 @@ def scan_freezes() -> list[dict]:
     for p in sorted(_FREEZE_DIR.glob("freeze_*.json")):
         try:
             out.append(json.loads(p.read_text(encoding="utf-8")))
-        except Exception:  # noqa: BLE001 坏文件不阻塞评估
+        except Exception as exc:  # noqa: BLE001 坏文件不阻塞评估，但必须留痕
+            _log.warning(
+                "freeze 记录读失败，跳过", extra={"file": p.name, "error": str(exc)}
+            )
             continue
     return out
 

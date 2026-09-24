@@ -69,14 +69,14 @@ def test_same_prompt_different_fingerprint_gives_different_key(tmp_path, monkeyp
 
 
 def test_compute_index_fp_is_stable_and_sensitive():
-    base = dict(
-        collection="c",
-        n_points=348,
-        n_chunks=320,
-        embed_model="BAAI/bge-m3",
-        chunk_strategy="structural",
-        bm25_strategy="jieba+indexed_text+ctx_off",
-    )
+    base = {
+        "collection": "c",
+        "n_points": 348,
+        "n_chunks": 320,
+        "embed_model": "BAAI/bge-m3",
+        "chunk_strategy": "structural",
+        "bm25_strategy": "jieba+indexed_text+ctx_off",
+    }
     a = index_identity.compute_index_fp(**base)
     assert a == index_identity.compute_index_fp(**base)
     assert a != index_identity.compute_index_fp(**{**base, "n_points": 349})
@@ -107,7 +107,7 @@ def test_orchestrator_sets_active_collection(monkeypatch):
     }
     index_identity.active_collection.set("")
     try:
-        Orchestrator(cfg, collection="my_kb").retriever
+        _ = Orchestrator(cfg, collection="my_kb").retriever
         assert captured["collection"] == "my_kb"
         assert index_identity.active_collection.get() == "my_kb"
     finally:
