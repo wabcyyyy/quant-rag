@@ -373,11 +373,30 @@ def ingest(
         ),
     ] = False,
     yes: Annotated[bool, typer.Option(help="与 --prune 同用：真的删掉幽灵块")] = False,
+    ctx: Annotated[
+        str,
+        typer.Option(
+            help="A3.4 contextual 前缀臂：off（默认，读配置 contextual.enabled）/ "
+            "both（前缀进 dense+BM25）/ bm25（前缀只进 BM25）。"
+            "前缀生成为每块一次 LLM 调用（可缓存）——先 --limit 2 试算外推，超预算即停"
+        ),
+    ] = "",
 ) -> None:
     """全链路入库：解析 → 分块 → LLM 元数据 → Embed → Qdrant。"""
     cfg = load_config()
     raw = raw_dir or Path(cfg["paths"]["raw"])
     parsed = parsed_dir or Path(cfg["paths"]["parsed"])
+    if ctx and ctx not in ("off", "both", "bm25"):
+        typer.echo(f"未知 --ctx 值：{ctx}（可选 off / both / bm25）")
+        raise typer.Exit(1)
+    if ctx == "both" or ctx == "bm25":
+        from doc_rag.ingest.contextual import contextual_cfg
+
+        eff = contextual_cfg(cfg)
+        typer.echo(
+            f"ctx 模式 {ctx}：前缀生成模型 {eff.get('model') or '(未配置!)'}"
+            "——建议先 --limit 2 试算成本\n"
+        )
 
     # 「语料应该有什么」的判据：本次这批源文件的 sha 集合。--limit 时它只是子集，
     # 拿去做对账会把没跑到的那几千篇全判成幽灵，所以这时退回 parsed_dir。
@@ -438,11 +457,18 @@ def ingest(
         prune=prune,
         assume_yes=yes,
         keep_doc_ids=keep_doc_ids,
+        ctx_mode=ctx or None,
     )
     typer.echo(
         f"入库：{result['docs']} 篇 / {result['chunks']} 块 → Qdrant[{collection}]"
-        f"（分块策略：{chunk_strategy}，LLM 元数据抽取：{'开' if result.get('llm_meta') else '关'}）"
+        f"（分块策略：{chunk_strategy}，LLM 元数据抽取：{'开' if result.get('llm_meta') else '关'}，"
+        f"ctx={result.get('ctx_mode')}）"
     )
+    if result.get("ctx_prefix_failed"):
+        typer.echo(
+            f"  [ctx] {result['ctx_prefix_failed']} 个前缀生成失败，已降级为「无前缀」"
+            "（不阻塞入库；重跑可借缓存补齐）"
+        )
     # 对账：解析产物 1127 篇 vs 入库 1121 篇，改造前这 6 篇空文档在输出里无声消失
     gap = result["parsed"] - result["docs"]
     if gap:

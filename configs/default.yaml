@@ -4,6 +4,9 @@ paths:
   raw: data/raw
   parsed: data/parsed
   eval: data/eval
+  # 外部基准数据（RGB）。**不入库**：上游是 CC BY-NC-SA 4.0（非商用），
+  # 所以仓库里只有抓取脚本与 commit hash，数据由 bench-rgb-fetch 在本地拉。
+  bench: data/bench
 
 embedding:
   # BGE-M3 via OpenAI 兼容 API（如 SiliconFlow）。实测响应不含 learned-sparse 字段
@@ -161,6 +164,20 @@ metadata_extraction:
   enabled: false
   # 抽取字段固定为 prompts.METADATA_EXTRACTION 里那五个；不在这里列一遍，
   # 否则改提示词时会出现「配置说抽 6 个、提示词只抽 5 个」的第二份事实来源。
+
+contextual:
+  # A3.4 contextual retrieval（ADR-0004）：入库时为每个 chunk 生成上下文前缀
+  # （这个片段讨论什么、在文档什么位置），拼在被索引文本最前再嵌入/分词。
+  # **默认 false，改动它 = 作废全部检索基线（L2 全作废）**；是否转正默认待用户
+  # 拍板（SPEC U3）。评估臂走 `ingest --ctx both|bm25`：
+  #   both = 前缀进 dense 与 BM25 双路；bm25 = 前缀只进 BM25（区分「前缀的信息
+  #   价值」与「前缀对 dense 的扰动」）。前缀生成走 LLM 响应缓存，同 chunk 重入库
+  #   零成本；失败降级为「无前缀」并计数，不阻塞入库。
+  enabled: false
+  # 留空三项 = 继承合成侧 llm 的端点与模型（照 judge 先例）
+  model: ""
+  base_url: ""
+  api_key: ""
 
 eval:
   gold_file: data/eval/gold.json

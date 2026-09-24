@@ -168,10 +168,15 @@ def _norm_str(s: str) -> str:
 
 
 def test_embed_text_and_bm25_share_one_composition():
-    """indexer._embed_text 与 BM25 的输入必须逐字同源（唯一实现）。"""
+    """indexer 的 BM25 输入必须经由 `_embed_text`（同一份被索引文本，唯一实现）。
+
+    A3.4 之后 BM25 源串多了 contextual 前缀臂（`bm25_src`），但它的基底仍是
+    `_embed_text(c)`——两路同源这条不变量靠它维持。
+    """
     import inspect
 
     from doc_rag.ingest import indexer
 
     source = inspect.getsource(indexer)
-    assert "build_bm25_text(_embed_text(chunk))" in source
+    assert "build_bm25_text(bm25_src(chunk))" in source
+    assert "base = _embed_text(c)" in source

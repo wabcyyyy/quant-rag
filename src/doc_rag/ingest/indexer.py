@@ -17,6 +17,7 @@ from qdrant_client import QdrantClient, models
 
 from .bm25 import build_bm25_text
 from .chunker import chunk_by
+from .contextual import contextual_cfg, generate_prefixes
 from .embedder import Embedder
 from .metadata import base_meta, extract_metadata
 from .schema import Chunk, IntermediateDoc
@@ -164,6 +165,7 @@ def index_parsed(
     prune: bool = False,
     assume_yes: bool = False,
     keep_doc_ids: set[str] | None = None,
+    ctx_mode: str | None = None,
 ) -> dict:
     """中间 JSON → Qdrant。
 
@@ -175,11 +177,21 @@ def index_parsed(
     解析出空块只是可疑、不是确证该删）；调用方传本次 raw 语料的 sha 集合时，
     parsed_dir 里那些已经没有对应源文件的陈旧产物会被单列成 `stale_parsed_json`。
     `prune` 只报告幽灵文档；再加 `assume_yes` 才真删（删前过 `_prune_decision` 三道闸）。
+    `ctx_mode`：contextual 前缀（A3.4/ADR-0004）的消融臂——
+    None=读配置 `contextual.enabled`；"off"=无前缀；"both"=前缀进 dense+BM25；
+    "bm25"=前缀只进 BM25（区分「前缀的信息价值」与「前缀对 dense 的扰动」）。
+    前缀走 LLM 响应缓存，同 chunk 重入库零成本；失败降级「无前缀」并计数。
     """
     client = QdrantClient(url=cfg["qdrant"]["url"], timeout=60)
     name = collection or cfg["qdrant"]["collection"]
     if use_llm_meta is None:
         use_llm_meta = bool((cfg.get("metadata_extraction") or {}).get("enabled"))
+    ctx = contextual_cfg(cfg)
+    if ctx_mode is None:
+        ctx_mode = "both" if ctx.get("enabled") else "off"
+    if ctx_mode not in ("off", "both", "bm25"):
+        raise ValueError(f"未知 ctx_mode：{ctx_mode}（可选 off / both / bm25）")
+    ctx["enabled"] = ctx_mode != "off"
     ensure_collection(
         client,
         name,
@@ -196,6 +208,8 @@ def index_parsed(
         "chunks": 0,
         "failed": [],
         "llm_meta": use_llm_meta,
+        "ctx_mode": ctx_mode,
+        "ctx_prefix_failed": 0,
     }
 
     # 先装载全部中间 JSON
@@ -231,11 +245,22 @@ def index_parsed(
     else:
         metas = [base_meta(d) for _, d in docs]
 
+    # A3.4：contextual 前缀整批先生成（可缓存；臂 ②/③ 共用同一批前缀文本）。
+    # 走独立 LLM 配置（可换更便宜的模型）、关思考、失败降级「无前缀」并计数。
+    ctx_prefixes: dict[str, str | None] = {}
+    if ctx["enabled"]:
+        chunk_lists = [chunk_by(chunk_strategy, d) for _, d in docs]
+        ctx_prefixes, ctx_failed = generate_prefixes(
+            ctx, [d for _, d in docs], chunk_lists
+        )
+        stats["ctx_prefix_failed"] = ctx_failed
+
     for (json_file, doc), meta in zip(docs, metas):
         try:
             chunks = chunk_by(chunk_strategy, doc)
             if not chunks:
                 continue
+
             # 幂等：清掉本文档旧块再插
             client.delete(
                 name,
@@ -250,7 +275,27 @@ def index_parsed(
                     )
                 ),
             )
-            vectors = embedder.embed([_embed_text(c) for c in chunks])
+
+            def indexed_text(c: Chunk) -> str:
+                """被索引文本 = [contextual 前缀] + section_path 前缀 + 正文。
+
+                `both`：dense 与 BM25 都带前缀；`bm25`：只有 BM25 带（dense 保持
+                与无前缀臂同输入——区分「前缀的信息价值」与「前缀对 dense 的扰动」）。
+                """
+                prefix = ctx_prefixes.get(c.chunk_id)
+                dense_src = _embed_text(c)
+                if prefix and ctx_mode == "both":
+                    dense_src = f"{prefix}\n{dense_src}"
+                return dense_src
+
+            def bm25_src(c: Chunk) -> str:
+                prefix = ctx_prefixes.get(c.chunk_id)
+                base = _embed_text(c)
+                if prefix:  # both 与 bm25 两臂的 BM25 都带前缀
+                    return f"{prefix}\n{base}"
+                return base
+
+            vectors = embedder.embed([indexed_text(c) for c in chunks])
             points = []
             for chunk, vector in zip(chunks, vectors):
                 payload = {
@@ -267,6 +312,8 @@ def index_parsed(
                     "meeting_type": meta["meeting_type"],
                     "attendees": meta["attendees"],
                     "topics": meta["topics"],
+                    # 前缀随 payload 落盘：读数与排查可回答「这块带没带前缀」
+                    "ctx_prefix": ctx_prefixes.get(chunk.chunk_id),
                 }
                 points.append(
                     models.PointStruct(
@@ -274,9 +321,9 @@ def index_parsed(
                         vector={
                             "dense": vector,
                             "bm25": models.Document(
-                                # 与 dense 同一份被索引文本（A3.2 对称）：正文 +
-                                # section_path 前缀，jieba 预分词在 build_bm25_text
-                                text=build_bm25_text(_embed_text(chunk)),
+                                # A3.2 对称：与 dense 同一份被索引文本（含 A3.4
+                                # 前缀臂的差异），jieba 预分词在 build_bm25_text
+                                text=build_bm25_text(bm25_src(chunk)),
                                 model="qdrant/bm25",
                             ),
                         },
