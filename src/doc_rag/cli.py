@@ -395,6 +395,30 @@ def ingest(
         )
         for item in stats["failed"]:
             typer.echo(f"  [解析失败] {item['file']}: {item['error']}")
+        # A3.3：扫描件兜底必须可见。引擎缺席时点名清单——静默等于回到
+        # 「扫描件这条链路只有标记」的旧病（README 已知不足第 3 条）。
+        n_ocr = len(stats.get("ocr_applied", []))
+        n_unavail = len(stats.get("ocr_unavailable", []))
+        n_near_empty = len(stats.get("near_empty", []))
+        if n_ocr or n_unavail or n_near_empty:
+            typer.echo(
+                f"  [扫描件] OCR 兜底成功 {n_ocr} 篇"
+                + (f" · 未走兜底 {n_unavail} 篇" if n_unavail else "")
+                + (
+                    f" · 无图少字 {n_near_empty} 篇（OCR 帮不上）"
+                    if n_near_empty
+                    else ""
+                )
+            )
+        if n_unavail:
+            typer.echo(
+                "  ⚠ 以下疑似扫描件未走兜底（缺 OCR 可选依赖）："
+                "uv sync --extra ocr 后重新 ingest"
+            )
+            for name in stats["ocr_unavailable"][:5]:
+                typer.echo(f"      {name}")
+            if n_unavail > 5:
+                typer.echo(f"      …另有 {n_unavail - 5} 篇")
         if not limit:
             keep_doc_ids = stats["doc_ids"]
     if parse_only:
@@ -1420,3 +1444,479 @@ def demo(
 
         orchestrator = Orchestrator(load_config(), collection=kb)
     demo_mod.build_ui(gradio, orchestrator).launch(server_name=host, server_port=port)
+
+
+# ── 外部基准：RGB（AAAI 2024 中文子集）────────────────────────────────────────
+#
+# 为什么要跑外部基准：本仓库所有已发布数字都测在公司语料上，而语料与结果文件按合规
+# 全部 gitignore 了——**面试官无法独立复核任何一个数**。RGB 公开可 clone，在它上面
+# 跑出来的数字别人能自己复现；而它的四类能力（拒答 / 信息整合 / 抗噪 / 反事实）
+# 正对着本项目的强项。协议与偏差声明见 src/doc_rag/benchmarks/rgb.py 的 docstring。
+
+_RGB_RAW_BASE = "https://raw.githubusercontent.com"
+
+
+@app.command("bench-rgb-fetch")
+def bench_rgb_fetch(
+    out_dir: Annotated[
+        Path | None,
+        typer.Option("--dir", help="落到哪里（默认 paths.bench 下的 rgb/）"),
+    ] = None,
+    force: Annotated[bool, typer.Option(help="已存在也重下")] = False,
+) -> None:
+    """抓 RGB 中文四个文件到本地（**数据不入库**：上游 CC BY-NC-SA 4.0，非商用）。
+
+    按固定 commit 抓，并写一份本地 MANIFEST（commit / 许可 / 每个文件的 sha256 与
+    行数）——结果文件要靠它自证「这份读数测的是哪个版本的数据」。
+    """
+    import hashlib
+    import json
+
+    import httpx
+
+    from doc_rag.benchmarks import rgb
+
+    cfg = load_config()
+    root = out_dir or Path(cfg["paths"]["bench"]) / "rgb"
+    root.mkdir(parents=True, exist_ok=True)
+    # 官方仓库里这四份的行数（用来发现「抓到了半截」或「上游换了内容」）
+    expected_lines = {"zh": 300, "zh_refine": 300, "zh_int": 100, "zh_fact": 100}
+    owner_repo = rgb.UPSTREAM_REPO.removeprefix("https://github.com/").removesuffix(
+        ".git"
+    )
+    manifest: dict = {
+        "repo": rgb.UPSTREAM_REPO,
+        "commit": rgb.UPSTREAM_COMMIT,
+        "license": rgb.UPSTREAM_LICENSE,
+        "note": "本地副本仅供本地评测；上游许可含 ShareAlike，副本不再分发",
+        "files": {},
+    }
+    manual = (
+        f"（手动等价命令：git clone {rgb.UPSTREAM_REPO} && "
+        f"git -C RGB checkout {rgb.UPSTREAM_COMMIT} && "
+        f"copy RGB/data/*.json {root}）"
+    )
+    failed: list[str] = []
+    for name, want in expected_lines.items():
+        target = rgb.dataset_path(root, name)
+        if target.exists() and not force:
+            raw = target.read_bytes()
+            typer.echo(f"  {name}.json 已存在（{len(raw) // 1024} KB），跳过")
+        else:
+            url = f"{_RGB_RAW_BASE}/{owner_repo}/{rgb.UPSTREAM_COMMIT}/data/{name}.json"
+            try:
+                resp = httpx.get(url, timeout=60.0, follow_redirects=True)
+                resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001 网络失败要给可执行的替代路径
+                typer.echo(f"  [失败] {name}.json：{exc} {manual}")
+                failed.append(name)
+                continue
+            target.write_bytes(resp.content)
+            raw = resp.content
+            typer.echo(f"  {name}.json 下载完成（{len(raw) // 1024} KB）")
+        lines = raw.decode("utf-8").count("\n")
+        manifest["files"][f"{name}.json"] = {
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw),
+            "lines": lines,
+            "lines_expected": want,
+            "lines_match": lines == want,
+        }
+        if lines != want:
+            # 行数不对就不是同一份数据，读数不可比——报出来而不是悄悄继续
+            typer.echo(
+                f"  ⚠ {name}.json 行数 {lines} ≠ 官方 {want}，请核对上游是否变更"
+            )
+    (root / "MANIFEST.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    typer.echo(f"MANIFEST 已写入 {root / 'MANIFEST.json'}")
+    if failed:
+        raise typer.Exit(1)
+
+
+@app.command("bench-rgb-prepare")
+def bench_rgb_prepare(
+    dataset: Annotated[
+        str, typer.Option("--dataset", help="哪个数据集（zh / zh_refine / zh_int）")
+    ] = "zh",
+    limit: Annotated[
+        int | None, typer.Option(help="只准备前 N 题（试跑用；判读用全量）")
+    ] = None,
+    dir_path: Annotated[
+        Path | None,
+        typer.Option("--dir", help="基准数据目录（默认 paths.bench 下的 rgb/）"),
+    ] = None,
+) -> None:
+    """备检索变体的料：把数据集文档并成语料 + 生成同格式的黄金集。
+
+    **这条路径测的才是本项目的 RAG**：官方协议是「文档由数据集提供」，检索层不参与，
+    所以那份读数只反映 prompt 与模型选型。这里把文档灌进 Qdrant，让系统自己检索
+    ——分块、Dense+BM25 融合、重排、上下文预算全部进环路。
+
+    判据等价：`eval/runner.py` 的 `all(must_contain 都在答案里)` 与 RGB 官方的
+    「全部 ground-truth 命中」是同一条规则，所以 `strict_keyword_accuracy` 就是
+    RGB 的 `all_rate`——两行数字可以直接对比，差值即**检索层的贡献**。
+
+    只备料、不跑：接下来的 ingest 与 eval 用仓库现成命令（脚本会打印出来）。
+    """
+    from doc_rag.benchmarks import rgb, rgb_retrieval
+
+    cfg = load_config()
+    if dataset not in rgb.PROTOCOL:
+        typer.echo(f"未知数据集：{dataset}（可选：{sorted(rgb.PROTOCOL)}）")
+        raise typer.Exit(1)
+    root = dir_path or Path(cfg["paths"]["bench"]) / "rgb"
+    src = rgb.dataset_path(root, dataset)
+    if not src.exists():
+        typer.echo(f"基准数据缺失：{src}；先跑 doc-rag bench-rgb-fetch")
+        raise typer.Exit(1)
+
+    records = rgb.load_records(src)
+    corpus = rgb_retrieval.build_corpus(records)
+    parsed_dir = root / f"parsed_{dataset}"
+    n = rgb_retrieval.write_parsed(corpus, parsed_dir)
+    gold_path = root / f"gold_{dataset}_retrieval.json"
+    rgb_retrieval.write_gold(
+        rgb_retrieval.build_gold(records, dataset, limit=limit), gold_path
+    )
+    kb = rgb_retrieval.COLLECTION[dataset]
+    chars = sum(len(t) for t in corpus.values())
+    typer.echo(f"语料：{n:,} 篇（去重后）· 合计 {chars:,} 字 → {parsed_dir}")
+    typer.echo(f"黄金集：{gold_path}（{limit or len(records)} 题）")
+    typer.echo(
+        "\n接下来（仓库现成命令）：\n"
+        f"  uv run doc-rag ingest --parsed-dir {parsed_dir} --kb {kb} --recreate --index-only\n"
+        f"  uv run doc-rag eval   --kb {kb} --gold {gold_path} --rewrite --rerank --fresh-answers"
+    )
+    typer.echo(
+        "注意：--index-only 跳过解析（中间 JSON 已经写好）；"
+        "eval 的 strict_keyword_accuracy 与给定文档那行的 all_rate 同判据、可直接对比。"
+    )
+
+
+@app.command("bench-rgb-run")
+def bench_rgb_run(
+    datasets: Annotated[
+        list[str] | None,
+        typer.Option("--dataset", help="跑哪些数据集（默认全部中文四个）"),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="每个组合只跑前 N 条——**只配试跑**，判读不得用截断样本"),
+    ] = None,
+    sample: Annotated[
+        int | None,
+        typer.Option(
+            help="每个组合**均匀抽** N 条（固定种子，可复现、可续跑到全量）——"
+            "降成本又要判读时用这个，不要用 --limit"
+        ),
+    ] = None,
+    instruction: Annotated[
+        str,
+        typer.Option(
+            help="production=本系统生产 prompt（默认）｜rgb=官方 instruction 锚点"
+        ),
+    ] = "production",
+    out: Annotated[
+        Path | None, typer.Option(help="逐条结果落盘路径（默认 data/eval/rgb_*.jsonl）")
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes", help="确认全量跑：调用数 > 50 且未给 --limit 时必须显式给"
+        ),
+    ] = False,
+    dir_path: Annotated[
+        Path | None,
+        typer.Option("--dir", help="基准数据目录（默认 paths.bench 下的 rgb/）"),
+    ] = None,
+    resume: Annotated[
+        Path | None,
+        typer.Option(
+            help="从这份已有结果续跑（已完成的条目跳过、失败的会重试，结果追加写）"
+        ),
+    ] = None,
+    workers: Annotated[
+        int,
+        typer.Option(
+            help="并发线程数（默认 4）。只改墙钟：每条记录的输入只依赖它自己；"
+            "实测有分钟级端点停顿，串行跑几千次会被拖到几十小时"
+        ),
+    ] = 4,
+    noise_rates: Annotated[
+        list[float] | None,
+        typer.Option(
+            "--noise-rate",
+            help="只跑指定噪声档（可重复）。用途是**同题对照**：与检索变体对比只需 0.0",
+        ),
+    ] = None,
+) -> None:
+    """按 RGB 协议跑一遍并落盘逐条结果。
+
+    文档由数据集提供，所以**不经过检索、不消耗嵌入**——本命令的调用数就是合成调用数。
+    先打印调用计划（组合数 × 条数），超阈值要求先试跑或显式确认：这是本仓库的
+    「先算账再动手」纪律，而这里最容易算错的就是组合数。
+
+    全量是几千次调用、几小时的长跑，所以**逐条落盘并 flush**、支持 `--resume` 续跑、
+    单条失败只记录不中断——一次网络抖动不该让前面几小时的调用白花。
+    """
+    import json
+
+    from doc_rag.benchmarks import rgb, rgb_runner
+    from doc_rag.generate import prompts
+
+    if instruction not in ("production", "rgb"):
+        typer.echo(f"未知 instruction：{instruction!r}（production | rgb）")
+        raise typer.Exit(1)
+    cfg = load_config()
+    chosen = list(datasets) if datasets else list(rgb.PROTOCOL)
+    unknown = [d for d in chosen if d not in rgb.PROTOCOL]
+    if unknown:
+        typer.echo(f"未知数据集：{unknown}（可选：{sorted(rgb.PROTOCOL)}）")
+        raise typer.Exit(1)
+    root = dir_path or Path(cfg["paths"]["bench"]) / "rgb"
+    missing = [d for d in chosen if not rgb.dataset_path(root, d).exists()]
+    if missing:
+        typer.echo(
+            f"基准数据缺失：{missing}；先跑 doc-rag bench-rgb-fetch（目录 {root}）"
+        )
+        raise typer.Exit(1)
+
+    records = {d: rgb.load_records(rgb.dataset_path(root, d)) for d in chosen}
+    only_rates = tuple(noise_rates) if noise_rates else None
+    plan = rgb_runner.call_plan(
+        chosen,
+        {d: len(records[d]) for d in chosen},
+        sample=sample,
+        only_rates=only_rates,
+    )
+    done = rgb_runner.done_index(rgb_runner.load_rows(resume)) if resume else {}
+    if resume:
+        typer.echo(f"续跑：{resume} 里已有 {len(done)} 条完成，本次只补未完成的")
+    typer.echo(f"调用计划：{plan['combos']} 个组合，共 {plan['calls']} 次合成调用")
+    for ds, rate, n in plan["per_combo"]:
+        typer.echo(f"  {ds:<10} noise={rate:<4} n={n}")
+    pending = max(plan["calls"] - len(done), 0)
+    if limit is None and pending > 50 and not yes:
+        typer.echo(
+            f"待跑 {pending} 次调用（>50）：先 `--limit 5` 试跑核实用量，"
+            "或 `--sample 100` 降档但保留可判读性，或确认后加 `--yes`。"
+        )
+        raise typer.Exit(1)
+
+    orchestrator = None
+    if instruction == "production":
+        from doc_rag.orchestrator import Orchestrator
+
+        # 给定上下文的入口不检索，所以这个 Orchestrator 不会建 Qdrant 连接
+        orchestrator = Orchestrator(cfg)
+
+    # 与 eval 结果文件同一约定：本地时区（astimezone 带上 tz，避免 naive datetime）
+    stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+    suffix = f"_limit{limit}" if limit else (f"_sample{sample}" if sample else "")
+    if out is None:
+        if resume is not None:
+            # 续跑必须写回同一个文件：另起一个新文件会让汇总算进旧行、而新文件里
+            # 没有它们——结果文件从此与汇总对不上。
+            out = resume
+        else:
+            out = (
+                Path(cfg["paths"]["eval"]) / f"rgb_{instruction}{suffix}_{stamp}.jsonl"
+            )
+    elif suffix and resume is None:
+        # 非全量跑绝不允许被误当成正式读数：文件名强制带标记
+        out = out.with_name(f"{out.stem}{suffix}{out.suffix}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    summaries: list[dict] = []
+    # 续跑时追加写（append），新跑则新建：两种情况下都**逐条 flush**——
+    # 长跑中途被打断时，已花的调用必须留在盘上。
+    mode = "a" if resume else "w"
+    with open(out, mode, encoding="utf-8") as f:
+
+        def _sink(row: dict, _f=f) -> None:
+            _f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            _f.flush()
+
+        for ds, rate in rgb_runner.protocol_combos(chosen, only_rates=only_rates):
+            rows = rgb_runner.run_combo(
+                cfg,
+                records[ds],
+                ds,
+                rate,
+                instruction=instruction,
+                limit=limit,
+                sample=sample,
+                workers=workers,
+                orch=orchestrator,
+                done=done,
+                sink=_sink,
+            )
+            s = rgb_runner.summarize(rows, rgb_runner.record_index(records[ds], ds))
+            s["instruction"] = instruction
+            summaries.append(s)
+            err = s["n_errors"]
+            typer.echo(
+                f"  {ds:<10} noise={rate:<4} n={s['n']:<5} "
+                f"all_rate={s['all_rate'] * 100:.2f}%"
+                + (f"  ⚠ 失败 {err} 条（已剔出分母）" if err else "")
+            )
+
+    meta = {
+        "benchmark": "RGB",
+        "repo": rgb.UPSTREAM_REPO,
+        "commit": rgb.UPSTREAM_COMMIT,
+        "license": rgb.UPSTREAM_LICENSE,
+        "instruction": instruction,
+        "datasets": chosen,
+        "limit_per_combo": limit,
+        "sample_per_combo": sample,
+        "noise_rates": list(only_rates) if only_rates else None,
+        # 两个标记要分开：`limit` 是取前 N（不可判读），`sample` 是均匀抽样（可判读，
+        # 但仍是全量的子集，报数时要带上 n）。混成一个「truncated」会让读者无法分辨。
+        "truncated": limit is not None,
+        "sampled": sample is not None,
+        "model": cfg["llm"].get("model"),
+        "temperature": cfg["llm"].get("temperature"),
+        "reasoning_effort": cfg["llm"].get("reasoning_effort"),
+        "reasoning_effort_by_type": cfg["llm"].get("reasoning_effort_by_type"),
+        "task_question_type": rgb_runner.TASK_QUESTION_TYPE,
+        "call_plan": plan,
+    }
+    if instruction == "production":
+        # 只在生产行有意义：rgb 行的 prompt 是官方模板，不是本仓库的 prompt 版本
+        meta["prompt_fingerprint"] = prompts.fingerprint(
+            cfg["llm"].get("prompt_version")
+        )
+        meta["prompt_version"] = cfg["llm"].get("prompt_version") or "tightened"
+    summary_path = out.with_suffix(".summary.json")
+    summary_path.write_text(
+        json.dumps(
+            {"meta": meta, "summaries": summaries}, ensure_ascii=False, indent=2
+        ),
+        encoding="utf-8",
+    )
+    typer.echo(f"逐条结果 → {out}\n汇总与 meta → {summary_path}")
+    typer.echo(rgb_runner.render_reports(summaries))
+    if limit:
+        # 外推的输入是**本次全部组合的合计**：拿一个组合去乘组合数会把 4000 说成 250
+        usage = rgb_runner.total_usage(summaries)
+        full = rgb_runner.call_plan(chosen, {d: len(records[d]) for d in chosen})
+        extrap = rgb_runner.extrapolate(usage, usage["n"], full["calls"])
+        typer.echo(
+            f"\n成本外推（本次 {usage['n']} 条实测，每个组合 {limit} 条）："
+            f"约 {extrap['per_call_prompt_tokens']} 输入 + "
+            f"{extrap['per_call_completion_tokens']} 输出 token/条、"
+            f"{extrap['per_call_ms'] / 1000:.1f}s/条 → 全量 {extrap['calls']} 次调用约需 "
+            f"{extrap['prompt_tokens']:,} 输入 / {extrap['completion_tokens']:,} 输出 token"
+            f"（其中思考 {extrap['reasoning_tokens']:,}）、串行约 {extrap['wall_hours']} 小时"
+        )
+        typer.echo("⚠ 本轮是截断样本，**不得用于判读**；全量请去掉 --limit 重跑。")
+    if sample:
+        typer.echo(
+            f"\n⚠ 本轮是**均匀抽样**（每组合最多 {sample} 条，固定种子）：可以判读，"
+            "但报数必须带上 n。补全量直接 `--resume` 指向这份文件——已完成的不会重复付费。"
+        )
+
+
+@app.command("bench-rgb-score")
+def bench_rgb_score(
+    results: Annotated[
+        list[Path],
+        typer.Argument(
+            help="bench-rgb-run 产出的逐条结果（可给多份，按 instruction 分行印）"
+        ),
+    ],
+    judge: Annotated[
+        bool,
+        typer.Option(
+            help="跑星号口径（Rej*/ED*，要调 LLM；判分旁挂缓存，重跑不重复付费）"
+        ),
+    ] = False,
+) -> None:
+    """判分并出并排表。`--judge` 对应官方的第二步（reject_evalue.py / fact_evalue.py）。
+
+    判分只读落盘的答案，**不重跑生成**——所以同一份结果可以用不同判据反复读，
+    这是把「生成」与「判分」两次花钱分开的前提（官方的两步脚本也是这个形状）。
+    """
+    import json
+
+    from doc_rag.benchmarks import rgb, rgb_runner
+
+    cfg = load_config()
+    root = Path(cfg["paths"]["bench"]) / "rgb"
+    judge_cfg: dict | None = None
+    if judge:
+        from doc_rag.eval.judge import judge_cfg as _jc
+
+        judge_cfg = _jc(cfg)
+
+    all_summaries: list[dict] = []
+    for path in results:
+        if not path.exists():
+            typer.echo(f"结果文件不存在：{path}")
+            raise typer.Exit(1)
+        # 判分旁挂文件长得像结果文件（同目录、同后缀、最近被改过），很容易被
+        # 通配符选中当输入——它的行没有 dataset 等字段，进来只会炸在深层。
+        if ".judge" in path.stem:
+            typer.echo(
+                f"{path} 是判分旁挂文件，不是逐条结果；请给 bench-rgb-run 产出的 .jsonl"
+            )
+            raise typer.Exit(1)
+        rows: list[dict] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+        if not rows:
+            typer.echo(f"{path} 是空的，跳过")
+            continue
+        # 每个组合单独判分：指标的分母是「一个组合内的条数」，混着算没有意义
+        if judge and judge_cfg is not None:
+            sidecar = rgb_runner.judge_sidecar_path(path)
+            cache = rgb_runner.load_judge_sidecar(sidecar)
+            with open(sidecar, "a", encoding="utf-8") as sink_f:
+
+                def _sink(item: dict, _f=sink_f) -> None:
+                    _f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    _f.flush()
+
+                rows = rgb_runner.judge_rows(rows, judge_cfg, cache, _sink)
+            typer.echo(f"判分旁挂 → {sidecar}（{len(cache)} 条已缓存）")
+        # 键必须带数据集：四个数据集的 id 各自从 0 开始，只按 id 建索引会互相覆盖，
+        # 于是 fakeanswer 取不到、反事实族的假阳性被静默算成 0（实测踩过）
+        loaded: dict[str, list[rgb.Record]] = {}
+        for ds in {str(r["dataset"]) for r in rows}:
+            p = rgb.dataset_path(root, ds)
+            if p.exists():
+                loaded[ds] = rgb.load_records(p)
+        records = rgb_runner.record_index(loaded)
+        groups: dict[tuple, list[dict]] = {}
+        for row in rows:
+            key = (row["instruction"], row["dataset"], row["noise_rate"])
+            groups.setdefault(key, []).append(row)
+        for (_instr, _ds, _rate), grp in sorted(
+            groups.items(), key=lambda kv: str(kv[0])
+        ):
+            s = rgb_runner.summarize(grp, records)
+            if judge:
+                s.update(rgb_runner.star_rates(grp))
+            all_summaries.append(s)
+
+    if not all_summaries:
+        typer.echo("没有可判分的结果。")
+        raise typer.Exit(1)
+    typer.echo(rgb_runner.render_reports(all_summaries))
+    usage = {
+        k: sum(int(s.get("usage", {}).get(k) or 0) for s in all_summaries)
+        for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
+    }
+    # 只报可核的量（调用数 / token）：本仓库的 ¥ 数历来是粗估，不在这里折算
+    typer.echo(
+        f"\n本批生成用量：{sum(s['n'] for s in all_summaries)} 条 · "
+        f"输入 {usage['prompt_tokens']:,} / 输出 {usage['completion_tokens']:,} token"
+        f"（其中思考 {usage['reasoning_tokens']:,}）"
+        f" · 命中缓存 {sum(s.get('cached_n', 0) for s in all_summaries)} 条"
+    )

@@ -43,6 +43,11 @@ def run(raw_dir: Path, parsed_dir: Path, limit: int | None = None) -> dict:
         "skipped_duplicate": 0,
         "failed": [],
         "doc_ids": set(),
+        # A3.3：OCR 兜底计数。ocr_unavailable 必须出现在 ingest 汇总里——
+        # 「疑似扫描件没走成兜底」静默 = 回到「只有标记、没有兜底」的旧病。
+        "ocr_applied": [],
+        "ocr_unavailable": [],
+        "near_empty": [],
     }
     seen: set[str] = set()
     files = [
@@ -65,6 +70,13 @@ def run(raw_dir: Path, parsed_dir: Path, limit: int | None = None) -> dict:
             stats["failed"].append({"file": str(path), "error": str(exc)})
             continue
         doc.meta.doc_id = digest[:16]
+        status = doc.meta.ocr_status
+        if status == "ocr_applied":
+            stats["ocr_applied"].append(path.name)
+        elif status == "ocr_unavailable":
+            stats["ocr_unavailable"].append(path.name)
+        elif status == "near_empty":
+            stats["near_empty"].append(path.name)
         out = parsed_dir / f"{digest[:16]}.json"
         out.write_text(doc.model_dump_json(indent=2), encoding="utf-8")
         stats["parsed"] += 1

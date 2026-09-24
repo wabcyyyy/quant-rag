@@ -34,6 +34,9 @@ demo = [
     # 演示页（T8）：独立 extra，不进核心依赖；启动 `uv run --extra demo doc-rag demo`
     "gradio>=4.0",
 ]
+ocr = [
+    "rapidocr-onnxruntime>=1.4.4",
+]
 
 [project.scripts]
 doc-rag = "doc_rag.cli:app"

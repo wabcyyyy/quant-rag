@@ -18,6 +18,9 @@ class Block(BaseModel):
     heading_level: int | None = None
     page: int | None = None
     bbox: list[float] | None = None
+    # 文本来源（A3.3）：None = 解析器文本层；"ocr" = OCR 兜底产物。
+    # 不进 Qdrant payload、不参与检索，只在画像与排查时回答「这段字哪来的」。
+    source: str | None = None
 
 
 class SourceMeta(BaseModel):
@@ -28,6 +31,10 @@ class SourceMeta(BaseModel):
     owner: str | None = None
     created_at: str | None = None
     edited_at: str | None = None
+    # OCR 兜底状态（A3.3）：None=未触发（文本层正常）；"ocr_applied"=已兜底；
+    # "ocr_unavailable"=疑似扫描件但引擎不可用（ingest 汇总必须点名，不许静默）；
+    # "near_empty"=无图少字，没有可识别对象，OCR 帮不上。
+    ocr_status: str | None = None
 
 
 class IntermediateDoc(BaseModel):

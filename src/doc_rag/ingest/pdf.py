@@ -2,6 +2,8 @@
 
 标题用字号启发识别（span 字号 ≥ 正文中位数 × 1.15 且短行，v1 层级粒度粗）。
 无框线表格会退化为分段文本——质量由画像统计 + 抽样人审把关（PLAN Phase 0）。
+A3.3：近空 / 扫描件（可抽文本过少且页面有图）走本地 OCR 兜底（ingest/ocr.py，
+可选依赖）；引擎缺席时把状态记在 meta.ocr_status，由 ingest 汇总点名，不静默。
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from pathlib import Path
 
 import pymupdf
 
+from . import ocr as ocr_mod
 from .schema import Block, IntermediateDoc, SourceMeta
 
 _HEADING_SIZE_RATIO = 1.15
@@ -18,6 +21,8 @@ _HEADING_MAX_CHARS = 60
 _TABLE_OVERLAP_RATIO = 0.5  # 文本块过半落在表格框内 → 属于表格内部
 _SHORT_LINE_CHARS = 2  # ≤2 字的行视为碎化行（部分飞书导出每字符一行）
 _LINE_GAP_FACTOR = 1.6  # 碎化行合并允许的纵向间距（相对字高）
+# 与画像同口径：平均每页可抽文本 < 50 字视为近空（profile._SCAN_CHARS_PER_PAGE）
+_SCAN_CHARS_PER_PAGE = 50
 
 
 def _merge_lines(lines: list[dict]) -> str:
@@ -86,14 +91,18 @@ def _detect_tables(page: pymupdf.Page) -> list[tuple[tuple[float, ...], str]]:
     return out
 
 
-def extract_pdf(path: Path) -> IntermediateDoc:
+def _extract_text_layer(path: Path) -> tuple[list[Block], int, int]:
+    """文本层抽取（原 extract_pdf 主体）。返回 (blocks, pages, images)。"""
     doc = pymupdf.open(path)
     try:
         body_sizes: list[float] = []
         entries: list[tuple[int, float, float, Block, float]] = []
+        pages = len(doc)
+        images = 0
 
         for page_index, page in enumerate(doc):
             page_no = page_index + 1
+            images += len(page.get_images(full=True))
             tables = _detect_tables(page)
 
             for bbox, markdown in tables:
@@ -158,9 +167,39 @@ def extract_pdf(path: Path) -> IntermediateDoc:
                 block.type = "heading"
                 block.heading_level = 2
             blocks.append(block)
+        return blocks, pages, images
     finally:
         doc.close()
-    return IntermediateDoc(
-        meta=SourceMeta(source_type="pdf", doc_id=path.stem, title=path.stem),
-        blocks=blocks,
-    )
+
+
+def extract_pdf(path: Path) -> IntermediateDoc:
+    """文本层优先；近空且有图（scan_likely）时走本地 OCR 兜底。
+
+    兜底状态记在 meta.ocr_status（None=文本层正常；ocr_applied；ocr_unavailable；
+    near_empty=无图少字、无识别对象）——ingest 汇总据此点名，不许静默。
+    """
+    blocks, pages, images = _extract_text_layer(path)
+    meta = SourceMeta(source_type="pdf", doc_id=path.stem, title=path.stem)
+    chars = sum(len(b.text) for b in blocks)
+    chars_per_page = chars / pages if pages else 0.0
+    if chars_per_page >= _SCAN_CHARS_PER_PAGE:
+        return IntermediateDoc(meta=meta, blocks=blocks)  # 文本层正常，不触发
+    if images == 0:
+        meta.ocr_status = "near_empty"  # 无图少字：损坏/空文档，OCR 帮不上
+        return IntermediateDoc(meta=meta, blocks=blocks)
+    # 有图无字（scan_likely）：OCR 兜底
+    pages_text = ocr_mod.ocr_pdf_pages(path)
+    if pages_text is None:
+        meta.ocr_status = "ocr_unavailable"
+        return IntermediateDoc(meta=meta, blocks=blocks)
+    for page_no, text in pages_text:
+        blocks.append(
+            Block(
+                type="paragraph",
+                text=text,
+                page=page_no,
+                source="ocr",  # 标注来源：画像与排查可回答「这段字哪来的」
+            )
+        )
+    meta.ocr_status = "ocr_applied"
+    return IntermediateDoc(meta=meta, blocks=blocks)
