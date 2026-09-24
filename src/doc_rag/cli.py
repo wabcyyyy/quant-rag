@@ -933,6 +933,13 @@ def evaluate(
             "失败/缺失条目重试（嵌入端点抖动后不再为一条超时多付一整轮）"
         ),
     ] = None,
+    repeat: Annotated[
+        int,
+        typer.Option(
+            help="B5 同配置连跑 N 遍：summary.repeat_span = 各指标跨遍极差"
+            "（噪声地板），主口径取第一遍；repeat_runs[] 保留每遍逐条"
+        ),
+    ] = 1,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -1041,28 +1048,58 @@ def evaluate(
         typer.echo(f"--resume 指定的文件不存在：{resume}")
         raise typer.Exit(1)
 
-    results = run_eval(
-        gold_file,
-        cfg=cfg,
-        collection=kb,
-        top_n=top_n,
-        limit=limit,
-        with_ragas=ragas,
-        with_answers=not retrieval_only,
-        mode=mode,
-        agent_mode=agent_mode or None,
-        aggregate=aggregate,
-        use_rewrite=rewrite,
-        use_rerank=rerank,
-        honor_rewrite_budget=honor_rewrite_budget,
-        sample=sample,
-        require_citation=not no_citation_constraint,
-        ragas_sample=ragas_sample,
-        use_judge_cache=not fresh_judge,
-        judge_over=judge_over,
-        resume_from=resume,
-        progress_file=out_file,
-    )
+    if repeat > 1:
+        from doc_rag.eval.runner import evaluate_with_repeat
+
+        results = evaluate_with_repeat(
+            gold_file,
+            cfg=cfg,
+            repeat=repeat,
+            collection=kb,
+            top_n=top_n,
+            limit=limit,
+            with_ragas=ragas,
+            with_answers=not retrieval_only,
+            mode=mode,
+            agent_mode=agent_mode or None,
+            aggregate=aggregate,
+            use_rewrite=rewrite,
+            use_rerank=rerank,
+            honor_rewrite_budget=honor_rewrite_budget,
+            sample=sample,
+            require_citation=not no_citation_constraint,
+            ragas_sample=ragas_sample,
+            use_judge_cache=not fresh_judge,
+            judge_over=judge_over,
+        )
+        span = results["summary"].get("repeat_span") or {}
+        typer.echo(
+            f"\n[repeat n={repeat}] 关键极差：Hit@5 {span.get('hit_at_5')}"
+            f" · MRR {span.get('mrr')} · 严格关键词 {span.get('strict_keyword_accuracy')}"
+        )
+    else:
+        results = run_eval(
+            gold_file,
+            cfg=cfg,
+            collection=kb,
+            top_n=top_n,
+            limit=limit,
+            with_ragas=ragas,
+            with_answers=not retrieval_only,
+            mode=mode,
+            agent_mode=agent_mode or None,
+            aggregate=aggregate,
+            use_rewrite=rewrite,
+            use_rerank=rerank,
+            honor_rewrite_budget=honor_rewrite_budget,
+            sample=sample,
+            require_citation=not no_citation_constraint,
+            ragas_sample=ragas_sample,
+            use_judge_cache=not fresh_judge,
+            judge_over=judge_over,
+            resume_from=resume,
+            progress_file=out_file,
+        )
     s = results["summary"]
     typer.echo(
         f"\n=== 评估结果（{s['n_items']} 条 · 预算={results['meta']['budget']}"

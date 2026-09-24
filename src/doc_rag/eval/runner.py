@@ -925,6 +925,50 @@ def evaluate(
     return results
 
 
+def evaluate_with_repeat(
+    gold_file: Path,
+    cfg: dict | None = None,
+    repeat: int = 1,
+    **kwargs: object,
+) -> dict:
+    """同配置连跑 repeat 遍（B5）：极差即噪声地板，主口径取第一遍。
+
+    输出形状：顶层 = 第一遍的 meta/summary/items（既有消费方零改动），
+    `meta.repeat` = 遍数、`summary.repeat_span` = 各数值指标跨遍的 max−min、
+    `repeat_runs[]` 保留每一遍的 summary 与逐条（离线可复核）。
+    噪声地板必须与结论同规模地测（PLAN §5.3：15 条子集会低估），所以 repeat
+    跑的是整份 gold，不是子集。
+    """
+    if repeat < 1:
+        raise ValueError(f"--repeat 必须 ≥1，得到 {repeat}")
+    runs = [evaluate(gold_file, cfg=cfg, **kwargs) for _ in range(repeat)]  # type: ignore[arg-type]
+    first = runs[0]
+    if repeat == 1:
+        return first
+    span: dict[str, float] = {}
+    for key, base in first["summary"].items():
+        vals = [r["summary"].get(key) for r in runs]
+        nums = [
+            float(v)
+            for v in vals
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        if len(nums) == repeat:
+            span[key] = round(max(nums) - min(nums), 4)
+    merged = dict(first)
+    meta = dict(first["meta"])
+    meta["repeat"] = repeat
+    summary = dict(first["summary"])
+    summary["repeat_span"] = span
+    summary["repeat_n"] = repeat
+    merged["meta"] = meta
+    merged["summary"] = summary
+    merged["repeat_runs"] = [
+        {"summary": r["summary"], "items": r["items"]} for r in runs
+    ]
+    return merged
+
+
 def _quantiles(values: list[float], ns: tuple[float, ...] = (50, 95)) -> dict:
     """分位数（标准库实现，不引 numpy）。
 
