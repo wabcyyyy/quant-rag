@@ -18,10 +18,22 @@ data/parsed/*
 data/sample_parsed/
 # 评估黄金集含公司内容，默认不入库；如需版本管理放私有仓
 data/eval/*.json
+# 逐条结果（.jsonl）同样不入库。**这条是补的**：原来只写了 *.json，于是 RGB 跑批的
+# 逐条结果（内含题目与文档原文 = 数据集副本）是未跟踪状态、会被提交——那等于再分发
+# 一份 CC BY-NC-SA 的数据集。汇总数字以 docs/guides/benchmark-rgb.md 里的表为准。
+data/eval/*.jsonl
 # 例外：脱敏合成的格式模板（虚构公司内容，不含真实语料），见 README
 !data/eval/golden_sample.json
+# 例外：公开黄金集与它的事实清单（全部虚构内容，A1/A2 产出）
+!data/eval/sample_corpus_manifest.json
+!data/eval/gold_core.json
+!data/eval/gold_full.json
+!data/eval/gold_core_agg.json
 # 例外：查询改写的泛化门禁集（全部指向 data/sample_raw 的虚构语料）
 !data/eval/rewrite_paraphrase.json
+# 外部基准数据（RGB）不入库：上游是 CC BY-NC-SA 4.0（非商用），副本不再分发。
+# 仓库里只留抓取脚本与 commit hash，数据由 `doc-rag bench-rgb-fetch` 本地拉。
+data/bench/
 
 # 工具缓存
 .pytest_cache/
