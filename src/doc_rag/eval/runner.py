@@ -816,6 +816,16 @@ def evaluate(
     # 效果了——和 rerank_failed / rewrite_degraded 是同一类自证。
     filter_fallback_n = sum(1 for r in per_item if r.get("filter_fallback"))
 
+    # B10：meta 带当前双指纹 + 对相关指纹的冻结对照警告（无 freeze 记录 → 静默）。
+    from .. import freeze as freeze_mod
+    from .. import index_identity
+
+    current_index_fp = index_identity.identity_for(retriever.collection)
+    current_synth_fp = freeze_mod.compute_synth_fp(cfg, gold_file)
+    freeze_warns = freeze_mod.freeze_warnings(
+        current_index_fp, current_synth_fp, with_answers=with_answers
+    )
+
     ragas_summary = None
     if with_ragas:
         ragas_summary = _run_ragas(
@@ -900,6 +910,11 @@ def evaluate(
             "n_errors": n_errors,
             "n_resumed": n_resumed,
             "resume_from": str(resume_from) if resume_from else None,
+            # B10 双指纹：结果文件自证「跑在哪一版索引与合成状态上」；
+            # 跨 freeze_id 并排报数在 meta 层就有告警可查（只对相关的那一个报警）
+            "index_fp": current_index_fp,
+            "synth_fp": current_synth_fp,
+            "freeze_warnings": freeze_warns,
             # 让结果文件自证身份：延迟数字曾因「不知道是哪个模型、缓存开没开」
             # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
             "llm_model": llm_section.get("model"),

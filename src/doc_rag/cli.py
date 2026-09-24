@@ -543,6 +543,41 @@ def ingest(
         )
 
 
+@app.command("freeze")
+def freeze_cmd(
+    kb: Annotated[
+        str | None, typer.Option(help="要冻结的 Qdrant collection 名")
+    ] = None,
+    gold: Annotated[
+        Path | None, typer.Option(help="随冻结登记的黄金集（sha256 进 synth_fp）")
+    ] = None,
+) -> None:
+    """B10：产出双指纹冻结记录（index_fp + synth_fp → .cache/freeze_<id>.json）。
+
+    幂等：同一状态重复 freeze 得到同一 freeze_id 与同一文件。eval 的 meta 会带当前
+    双指纹并对**只相关的那一个**报警（只改 prompt → 只报 synth_fp 不匹配）。
+    正式冻结清单（七项 + git status 干净）在下一轮读数轮执行，这里先落工具。
+    """
+    from doc_rag import freeze as freeze_mod
+
+    cfg = load_config()
+    collection = kb or cfg["qdrant"]["collection"]
+    gold_file = gold or Path(cfg["eval"]["gold_file"])
+    record = freeze_mod.freeze(cfg, collection, gold_file)
+    typer.echo(
+        f"freeze_id {record['freeze_id']} · index_fp {record['index_fp']}"
+        f" · synth_fp {record['synth_fp']}"
+    )
+    typer.echo(f"  collection={collection} · gold={gold_file}")
+    typer.echo(f"  commit={record['commit']}")
+    typer.echo(f"  → {record['file']}")
+    existing = freeze_mod.scan_freezes()
+    typer.echo(f"  当前共 {len(existing)} 份冻结记录（幂等重跑不会新增）")
+    typer.echo(
+        "  注意：工具级指纹已落盘；正式冻结还需 git status 干净 + 配置快照（SPEC §6）"
+    )
+
+
 @app.command("cache-stats")
 def cache_stats_cmd() -> None:
     """本地响应缓存的画像：条数、体积、按模型的分布、最老/最新条目。
@@ -1196,6 +1231,9 @@ def evaluate(
             f" tokens（其中思考 {reas:,}，占输出 {reas / st['completion_tokens']:.0%}）"
         )
 
+    if results["meta"].get("freeze_warnings"):
+        for w in results["meta"]["freeze_warnings"]:
+            typer.echo(f"  ⚠ [freeze] {w}")
     if results["meta"].get("n_errors"):
         typer.echo(
             f"  ⚠ {results['meta']['n_errors']} 条失败未计入分母"
