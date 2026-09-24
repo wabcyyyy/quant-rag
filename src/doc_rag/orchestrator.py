@@ -27,6 +27,7 @@ from typing import Any
 from qdrant_client import QdrantClient
 
 from . import agent as agent_mod
+from . import index_identity
 from .generate import synthesizer as synthesizer_mod
 from .generate import two_stage as two_stage_mod
 from .ingest.embedder import Embedder
@@ -161,6 +162,9 @@ class Orchestrator:
             collection=kb or self.collection,
             retrieval_cfg=self.cfg["retrieval"],
         )
+        # B4：检索路径声明「本次问答用的是哪个 collection」——llm 缓存键据此织入
+        # 库指纹，索引语义变更后旧答案自动 miss。contextvar 按请求隔离，不串库。
+        index_identity.active_collection.set(kb or self.collection)
         # 合成器逐调用新建：它的 last_meta 是可变属性，复用会让并发请求互相读到
         # 对方的计时（假延迟）。eval 走注入路径，顺序执行下复用同一个实例。
         return retriever, synthesizer_mod.Synthesizer(self.cfg["llm"])

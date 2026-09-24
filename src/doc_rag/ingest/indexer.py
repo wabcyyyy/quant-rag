@@ -15,6 +15,7 @@ from typing import Any
 
 from qdrant_client import QdrantClient, models
 
+from .. import index_identity
 from .bm25 import build_bm25_text
 from .chunker import chunk_by
 from .contextual import contextual_cfg, generate_prefixes
@@ -345,6 +346,24 @@ def index_parsed(
     if keep_doc_ids is not None:
         rec["stale_parsed_json"] = sorted(parsed_ids - keep_doc_ids)
     stats["reconcile"] = rec
+
+    # B4：把本 collection 的库指纹落盘——检索路径的 LLM 缓存键据此织入，
+    # 索引语义变更（换分块/BM25 文本/嵌入模型/OCR 补入/ctx 臂）后旧答案自动
+    # miss，不再出现「块没变、语义变了、旧笔记照抄」的假命中。
+    fp = index_identity.compute_index_fp(
+        collection=name,
+        n_points=int(rec["collection_chunks"]),
+        n_chunks=int(rec["collection_docs"]),
+        embed_model=str((cfg.get("embedding") or {}).get("model") or ""),
+        chunk_strategy=chunk_strategy,
+        bm25_strategy=f"jieba+indexed_text+ctx_{ctx_mode}",
+    )
+    fingerprints = index_identity.load_fingerprints()
+    stats["index_fp"] = fp
+    stats["index_fp_changed"] = fingerprints.get(name) not in (None, fp)
+    fingerprints[name] = fp
+    index_identity.save_fingerprints(fingerprints)
+
     if prune:
         decision = _prune_decision(rec, stats, assume_yes)
         if decision["deleted"]:

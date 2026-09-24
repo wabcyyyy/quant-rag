@@ -469,6 +469,17 @@ def ingest(
             f"  [ctx] {result['ctx_prefix_failed']} 个前缀生成失败，已降级为「无前缀」"
             "（不阻塞入库；重跑可借缓存补齐）"
         )
+    # B4：库指纹变更 = 旧答案自动失配（缓存键已织入指纹）。条数只提示不删——
+    # 删除是显式动作（cache-clear --yes），静默清理会让「回滚索引复测」丢数据。
+    if result.get("index_fp_changed"):
+        from doc_rag.generate.llm import cache_stats
+
+        st = cache_stats()
+        typer.echo(
+            f"  [指纹] 库指纹已变更 → {result['index_fp']}："
+            f"缓存中 {st['cached_total']} 条旧答案对新索引自动失配"
+            "（保留在库；确认不回滚可用 cache-clear --yes 清理）"
+        )
     # 对账：解析产物 1127 篇 vs 入库 1121 篇，改造前这 6 篇空文档在输出里无声消失
     gap = result["parsed"] - result["docs"]
     if gap:

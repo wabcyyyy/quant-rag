@@ -84,17 +84,26 @@ def _conn() -> sqlite3.Connection:
 
 def _cache_key(llm_cfg: dict, messages: list[dict], **params) -> str:
     """键必须包含 endpoint：同名模型走不同供应商（OpenRouter / 官方）答案不同，
-    混用会拿 A 家缓存回答 B 家的问题。"""
-    blob = json.dumps(
-        {
-            "base_url": (llm_cfg.get("base_url") or "").rstrip("/"),
-            "model": llm_cfg["model"],
-            "messages": messages,
-            "params": params,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    混用会拿 A 家缓存回答 B 家的问题。
+
+    B4：检索路径还织入「当前 collection 的库指纹」（index_identity）——块没变但
+    索引语义变了（换 BM25 文本/分块策略、OCR 兜底补入）时，旧答案不许再被复用。
+    指纹缺失（新 clone 未 ingest）退回原口径，绝不报错。前缀生成等非检索路径
+    contextvar 为空，键不含指纹（臂 ②/③ 由此共享同一批前缀缓存）。"""
+    from .. import index_identity
+
+    payload = {
+        "base_url": (llm_cfg.get("base_url") or "").rstrip("/"),
+        "model": llm_cfg["model"],
+        "messages": messages,
+        "params": params,
+    }
+    index_fp = index_identity.active_identity()
+    if index_fp:
+        # 指纹存在才进键：裸检出（无指纹文件）时键与历史逐字一致，
+        # 既有缓存零作废；一旦有指纹，索引语义变更立即 miss（B4 的目的）
+        payload["index_fp"] = index_fp
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
