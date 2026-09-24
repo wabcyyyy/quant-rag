@@ -266,6 +266,48 @@ def _retrieve_contexts(
     return result.contexts
 
 
+def _error_row(item: GoldItem, exc: Exception) -> dict:
+    """单条失败的占位行：指标键全部缺位/None。
+
+    聚合侧的 None 过滤（`if r["first_hit_rank"]` / `.get(...) is not None`）自然把
+    它们剔出全部分母——「没测出」不冒充 0，也绝不终止整轮（嵌入端点抖动实测
+    62~127s 量级，一条失败毁掉整轮付费运行是最大的浪费）。
+    """
+    return {
+        "id": item.id,
+        "type": item.type,
+        "question": item.question,
+        "error": str(exc),
+        "first_hit_rank": None,
+        "retrieved_doc_ids": [],
+        "doc_coverage": None,
+        "doc_coverage_ceiling": None,
+        "ndcg_at_8": None,
+        "ndcg_at_5": None,
+        # `_rank_metrics` 的标准族键（失败行整族缺位，`.get()` 侧照 None 处理）
+        "recall_at_5": None,
+        "precision_at_5": None,
+        "ap_at_5": None,
+        "n_source_docs": len(item.source_doc_ids),
+        "n_retrieved": None,
+        "n_contexts": None,
+        "trace": None,
+        "answered_ok": None,
+        "answered_ok_subseq": None,
+        "keypoint_hit": None,
+        "n_key_points": None,
+        "answer_grade": None,
+        "over_refusal": None,
+        "over_refusal_gold": None,
+        "citation_valid": None,
+        "citation_present": None,
+        "n_citations": 0,
+        "answer": "",
+        "retrieval_empty": None,
+        "latency": None,
+    }
+
+
 def evaluate(
     gold_file: Path,
     cfg: dict | None = None,
@@ -285,6 +327,8 @@ def evaluate(
     use_judge_cache: bool = True,
     honor_rewrite_budget: bool = False,
     judge_over: dict | None = None,
+    resume_from: Path | str | None = None,
+    progress_file: Path | None = None,
 ) -> dict:
     cfg = cfg or load_config()
     if mode:
@@ -301,24 +345,60 @@ def evaluate(
         items_raw = _sample_rows(items_raw, sample)
     items = [GoldItem.model_validate(i) for i in items_raw]
 
-    per_item: list[dict] = []
-    for item in items:
-        result = orchestrator.answer(
-            item.question,
-            top_n=top_n,
-            use_rewrite=use_rewrite,
-            use_rerank=use_rerank,
-            force_aggregate=aggregate,
-            require_citation=require_citation,
-            with_answer=with_answers,
-            honor_rewrite_budget=honor_rewrite_budget,
-            # `agent_mode` 与上面那个 `mode` 不是一回事：后者是检索模式（dense/hybrid），
-            # 前者是 single/agent。名字分开是因为这两个词在项目里都出现过，混用一次
-            # 就会让评估臂悄悄换掉 policy 而 meta 上还自称同一条。
-            mode=agent_mode,
-            # 真题型只进 trace 做「预测准不准」的核对，不参与开关（见 agent.predict_type）
-            question_type=item.type,
+    # B2 续跑（照 rgb_runner.done_index 先例）：已有**成功**条目原样复用不重跑，
+    # 失败条目重试——端点抖动的批量评估不再为一条 62s 的超时多付一整轮钱。
+    resume_done: dict[str, dict] = {}
+    n_resumed = 0
+    if resume_from is not None:
+        prior = json.loads(Path(resume_from).read_text(encoding="utf-8"))
+        resume_done = {
+            it["id"]: it for it in prior.get("items", []) if not it.get("error")
+        }
+
+    def _flush_progress(meta_partial: dict) -> None:
+        """逐条 flush（B2）：任何时刻杀掉进程，已完成条目都已在盘上可 resume。"""
+        if progress_file is None:
+            return
+        payload = {
+            "meta": meta_partial,
+            "summary": {"n_items_done": len(per_item), "n_errors": n_errors},
+            "items": per_item,
+        }
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        progress_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    per_item: list[dict] = []
+    n_errors = 0
+    for item in items:
+        prior_row = resume_done.pop(item.id, None)
+        if prior_row is not None:
+            per_item.append(prior_row)
+            n_resumed += 1
+            continue
+        try:
+            result = orchestrator.answer(
+                item.question,
+                top_n=top_n,
+                use_rewrite=use_rewrite,
+                use_rerank=use_rerank,
+                force_aggregate=aggregate,
+                require_citation=require_citation,
+                with_answer=with_answers,
+                honor_rewrite_budget=honor_rewrite_budget,
+                # `agent_mode` 与上面那个 `mode` 不是一回事：后者是检索模式（dense/hybrid），
+                # 前者是 single/agent。名字分开是因为这两个词在项目里都出现过，混用一次
+                # 就会让评估臂悄悄换掉 policy 而 meta 上还自称同一条。
+                mode=agent_mode,
+                # 真题型只进 trace 做「预测准不准」的核对，不参与开关（见 agent.predict_type）
+                question_type=item.type,
+            )
+        except Exception as exc:  # noqa: BLE001 单条失败不终止整轮（B2）
+            n_errors += 1
+            per_item.append(_error_row(item, exc))
+            _flush_progress({"partial": True, "resume_of": str(resume_from or "")})
+            continue
         results = result.retrieved
         ctx = result.contexts
         got_ids = [r["doc_id"] for r in results]
@@ -560,9 +640,14 @@ def evaluate(
     ks = [r["n_key_points"] for r in kp_rows if r["n_key_points"]]
     grades = Counter(r["answer_grade"] for r in kp_rows if r["answer_grade"])
 
-    lens = [r["n_retrieved"] for r in per_item]
+    # 失败行（B2）的 n_retrieved / n_contexts 是 None：清单长度只统计真跑过的条目
+    lens = [r["n_retrieved"] for r in per_item if r.get("n_retrieved") is not None]
+    ctx_lens = [r["n_contexts"] for r in per_item if r.get("n_contexts") is not None]
     summary = {
         "n_items": len(per_item),
+        # B2：单条失败不终止整轮，但失败数必须可见——它决定这轮读数能不能信
+        "n_errors": n_errors,
+        "n_resumed": n_resumed,
         # ↓ 标准名是主键。`hit_at_*` 保留这个名字是因为它**确实**是 Hit Rate@k
         # （首命中在前 k 位），不是 Recall——这个区别当年被搞错过一次，护栏见
         # `tests/test_eval_metric_definitions.py` 第 1 条。
@@ -603,8 +688,8 @@ def evaluate(
         "list_len": {
             "retrieved_min": min(lens) if lens else None,
             "retrieved_max": max(lens) if lens else None,
-            "contexts_min": min((r["n_contexts"] for r in per_item), default=None),
-            "contexts_max": max((r["n_contexts"] for r in per_item), default=None),
+            "contexts_min": min(ctx_lens) if ctx_lens else None,
+            "contexts_max": max(ctx_lens) if ctx_lens else None,
         },
         "strict_keyword_accuracy": _safe_div(
             sum(1 for r in scorable if r["answered_ok"]), len(scorable)
@@ -811,6 +896,10 @@ def evaluate(
             "filter_fallback_n": filter_fallback_n,
             "filters_applied_n": sum(1 for r in per_item if r.get("filter_applied")),
             "with_answers": with_answers,
+            # B2：这轮的自证——失败条数与续跑复用条数（>0 说明结果含历史轮次）
+            "n_errors": n_errors,
+            "n_resumed": n_resumed,
+            "resume_from": str(resume_from) if resume_from else None,
             # 让结果文件自证身份：延迟数字曾因「不知道是哪个模型、缓存开没开」
             # 而无法归属（PLAN 里 1.3s 与 5.3~7.4s 的矛盾）。事后靠人回忆不可靠。
             "llm_model": llm_section.get("model"),
@@ -826,6 +915,13 @@ def evaluate(
         "ragas": ragas_summary,
         "items": per_item,
     }
+    if progress_file is not None:
+        # 最终落盘与逐条 flush 同一路径：中途死掉有部分结果可 resume，
+        # 正常结束则这份就是完整结果（CLI 不再重复写）
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        progress_file.write_text(
+            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     return results
 
 

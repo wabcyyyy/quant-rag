@@ -926,6 +926,13 @@ def evaluate(
             "评估臂开关；生产默认跟配置 synthesis.two_stage.enabled"
         ),
     ] = False,
+    resume: Annotated[
+        Path | None,
+        typer.Option(
+            help="B2 续跑：从既有结果文件补齐——成功条目原样复用不重跑，"
+            "失败/缺失条目重试（嵌入端点抖动后不再为一条超时多付一整轮）"
+        ),
+    ] = None,
 ) -> None:
     """评估：客观指标（Recall@k / MRR / 包含匹配 / 拒答 / 引用）+ 可选 RAGAS。"""
     import json
@@ -1022,6 +1029,18 @@ def evaluate(
         typer.echo(f"黄金集不存在：{gold_file}——先跑 doc-rag gen-gold")
         raise typer.Exit(1)
 
+    # 落盘路径提前定：B2 的逐条 flush 写的就是这份文件（中途死掉可 --resume 补齐）
+    out_dir = Path(cfg["paths"]["eval"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = (
+        ragas_out
+        or out_dir
+        / f"results_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+    if resume is not None and not resume.exists():
+        typer.echo(f"--resume 指定的文件不存在：{resume}")
+        raise typer.Exit(1)
+
     results = run_eval(
         gold_file,
         cfg=cfg,
@@ -1041,6 +1060,8 @@ def evaluate(
         ragas_sample=ragas_sample,
         use_judge_cache=not fresh_judge,
         judge_over=judge_over,
+        resume_from=resume,
+        progress_file=out_file,
     )
     s = results["summary"]
     typer.echo(
@@ -1127,19 +1148,25 @@ def evaluate(
             f" tokens（其中思考 {reas:,}，占输出 {reas / st['completion_tokens']:.0%}）"
         )
 
-    out_dir = Path(cfg["paths"]["eval"])
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if results["meta"].get("n_errors"):
+        typer.echo(
+            f"  ⚠ {results['meta']['n_errors']} 条失败未计入分母"
+            f"（summary.n_errors；--resume {out_file.name} 可只补失败条）"
+        )
+    if results["meta"].get("n_resumed"):
+        typer.echo(
+            f"  [resume] 复用 {results['meta']['n_resumed']} 条已成功条目"
+            "（结果含历史轮次，meta.n_resumed 自证）"
+        )
+
     # --ragas-out 同时给直跑路径用：三组对照（T4）要求每组结果落在指定文件名上，
-    # 时间戳文件名无法预先写进 compare-ragas 的命令行
-    out_file = (
-        ragas_out
-        or out_dir
-        / f"results_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}.json"
-    )
-    out_file.parent.mkdir(parents=True, exist_ok=True)
-    out_file.write_text(
-        json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    # 时间戳文件名无法预先写进 compare-ragas 的命令行。B2 起最终落盘已由
+    # progress_file 完成（同一份文件），这里只在无 flush 路径时兜底写一次。
+    if not out_file.exists():
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(
+            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     typer.echo(f"明细已写入 {out_file}")
 
 
