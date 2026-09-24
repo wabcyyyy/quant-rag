@@ -30,7 +30,7 @@
 | 编排 | 自研 Pipeline（不引编排框架，模块边界清晰） | 解析/分块/评估全是深度定制，框架抽象碍事；agent 一期同样拍板自研薄循环，见 §5.5 F2 |
 | 存储 | Qdrant（Dense + 全文 BM25 双路） | Query API 原生 RRF 融合；单存储，几千份规模无压力 |
 | Embedding | BGE-M3 dense via SiliconFlow API | 中文文档正确默认；API 不吐 sparse（2026-09 查证），hybrid 第二路走 Qdrant full-text BM25 |
-| Reranker | bge-reranker（本地小模型）或 API rerank | 性价比高 |
+| Reranker | bge-reranker-v2-m3 via API rerank（SiliconFlow 同源，`configs/default.yaml`） | 性价比高；从未部署过本地 rerank 方案（此前选型表那格的措辞是漂移，2026-09-25 修正） |
 | LLM | DeepSeek 官方 API：`deepseek-flash`（实测选定，见「模型选型」） | 包含匹配 0.836 vs GLM-4.5-Air 0.745，价差被本地响应缓存抵消；思考型模型，合成侧延迟是主要瓶颈 |
 | 评估 | RAGAS + exact-match 双轨；黄金集 v0 ≥30 → 终版 ≥50（v1 实为 63 条，题型分布见 §5.3） | LLM 打分与确定性指标互为校验 |
 | 交付 | CLI + FastAPI；Gradio 演示页作加分项 | 基线优先，演示够用即可 |

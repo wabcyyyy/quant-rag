@@ -21,9 +21,9 @@ import subprocess
 from pathlib import Path
 
 from .config import project_root
-from .log import get_logger
 from .generate import prompts
 from .index_identity import identity_for
+from .log import get_logger
 
 _log = get_logger("freeze")
 

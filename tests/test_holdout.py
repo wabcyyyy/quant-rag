@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import typing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +90,7 @@ def test_eval_flags_holdout_in_meta(tmp_path, monkeypatch):
 
     class _Retriever:
         collection = "t"
-        cfg = {"mode": "hybrid"}
+        cfg: typing.ClassVar = {"mode": "hybrid"}
 
     class _Orch:
         def __init__(self, *a, **kw):

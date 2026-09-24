@@ -84,7 +84,7 @@ docker compose up -d   # Qdrant :6333（镜像在 compose 里钉 v1.19.1，不�
 uv run doc-rag check   # 冒烟：LLM 连通 / Embedding 维度与 dense_dim 一致 / sparse 探测 / Qdrant 版本与钉版一致
 uv run doc-rag profile # Phase 0：语料画像（data/raw 放入语料后执行）
 uv run doc-rag ingest  # 双路接入 → data/parsed 统一中间 JSON
-uv run pytest          # 测试（371 项，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest）
+uv run pytest          # 测试（431 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
 uv run doc-rag check-rewrite  # 查询改写泛化门禁（真实调用模型，会花约 ¥0.01，并打印生效模型与逐次延迟）
 ```
 
@@ -134,6 +134,61 @@ uv run --extra demo doc-rag demo --kb doc_rag_sample   # 演示页连示例库
 端到端 p95 ≈4~5s。注意：**10 篇小库满分只背书「管线正确、eval 判分口径可跑通」**，
 真实语料上的难度与结论看下方黄金集 v2 各节；`--parsed-dir` 让示例解析产物与公司语料
 目录隔离，避免把全量中间 JSON 误灌进示例 collection。
+
+## 外部基准（RGB 中文子集，可独立复核）
+
+上面两节的数字都测在**公司语料**上，而语料与结果文件按合规 gitignore 了——读者无法
+独立复核。所以另跑了一份**公开基准**：RGB（AAAI 2024）中文四个文件，四类能力恰好
+对着本项目的强项（拒答 / 跨文档聚合 / 抗噪 / 反事实）。
+
+```bash
+uv run doc-rag bench-rgb-fetch                                # 抓数据（不入库：CC BY-NC-SA）
+uv run doc-rag bench-rgb-run --sample 50 --workers 4 --yes    # 每组合均匀抽 50 条
+uv run doc-rag bench-rgb-score data/eval/rgb_production_sample50_*.jsonl --judge
+```
+
+`--sample 50` 下的读数（每档 n=50，800 条调用）：噪声鲁棒性 **96~100%**（论文最强基线
+70.67%）、信息整合 **82/80/72%**（论文基线 63/58/47%）、负向拒答按语义判读 **Rej\* 82/96%**
+（论文最好 43.33%）；反事实那一族 ACC 只有 10%（且全是子串判据的假阳性），
+**原因是生产 prompt 禁止用参数记忆覆盖文档**——这是一条被外部基准照出来的设计取舍。
+协议、偏差声明、成本与不确定项逐条写在 **[docs/guides/benchmark-rgb.md](docs/guides/benchmark-rgb.md)**。
+一句话：它替代不了「有真实用户」，但让「数字可被独立复核」这一条成立了。
+
+**但上面那组读数测不到本项目的检索层**——RGB 官方协议是「文档由数据集提供」，检索不
+参与，所以它只反映 prompt 与模型选型。**检索变体**把文档并成一份语料灌进 Qdrant，让
+系统自己去找：
+
+```bash
+uv run doc-rag bench-rgb-prepare --dataset zh     # 10,883 篇去重语料 + 同格式黄金集
+uv run doc-rag ingest --parsed-dir data/bench/rgb/parsed_zh --kb rgb_zh --recreate --index-only
+uv run doc-rag eval --kb rgb_zh --gold data/bench/rgb/gold_zh_retrieval.json \
+                    --rewrite --rerank --fresh-answers --max-contexts 5
+```
+
+两侧判据是同一条规则（`all(must_contain 都在答案里)` ≡ RGB 的「全部 ground-truth 命中」），
+所以 `strict_keyword_accuracy` **就是** RGB 的 `all_rate`，两行可以直接对比：
+
+| 臂（同为 300 题、同为 5 块上下文） | 文档来源 | 准确率 |
+|---|---|---|
+| 给定文档 | 数据集给的 5 篇正确文档 | **99.33%** |
+| **自己检索** | 从 10,883 篇里检索 5 块 | **90.67%** |
+
+**Δ = −8.66pt 就是检索层的代价**：其中约 4.3pt 是「根本没找到」（Hit@5 = **0.9567**），
+约 4pt 是「找到了但没找全」（`Recall@清单` 0.4607，上限 0.7523）。MRR **0.8400**。
+这条「找不全而非找不到」的结论与公司语料上的既有结论一致——**在第二份独立语料上重现**。
+
+**聚合族（`zh_int`，100 题）更值得看**：生产预算下只有 **47%**（oracle 83%），
+但根因**不是检索找不到**（Hit@5 仍 0.92），而是**上下文预算**——每题 gold 有 6~19 篇，
+8 格清单装不下。把清单与上下文一起放宽到 25 格：
+
+| 清单/上下文 | 准确率 | 过度拒答（gold 已在上下文） | 端到端 p50 | 输入 token |
+|---|---|---|---|---|
+| 8 格 → 5 块（生产） | 47.00% | 0.32 | 7.4s | 137,598 |
+| **25 格 → 25 块** | **81.00%** | **0.10** | 10.1s | 394,539（2.9×） |
+
+**47% → 81%，几乎追平 oracle 的 83%**，代价是 p95 24.3s 破 SLO——这正是公司语料上
+E2 消融的同一结论（+26.7pt、代价 3.4 倍输入）**在外部基准上重现**，也解释了为什么
+它没有被采纳为默认口径。
 
 ## 双路接入（统一中间表示）
 
@@ -663,11 +718,13 @@ $ uv run doc-rag query "公司关于碳排放配额的管理制度是什么？"
   BM25 文本）诊断收档但**不实施**：检索重跑噪声 ±2 条下「Hit@5 不倒退」判据无功效
   （详见 PLAN §5.6 Phase 2.5 的选项与拍板）；q020 属 chunker 级缺陷，需重分块重嵌入，
   显式不做。
-- **扫描件这条链路根本没有兜底，只有标记**：~15 份真扫描件（聊天截图/扫描合同）抽不出可用文本，
-  而 `ingest/profile.py` 做的事是把「PDF 每页可抽文本 <50 字符」标成 `scan_suspect`——那是**设计里**
-  MinerU 兜底的触发信号，**代码里不存在任何 OCR / MinerU 调用**（PDF 只有 pymupdf 文本抽取）。
-  以前这里写「未走 MinerU 兜底」，读起来像有一条备用路径没启用，那是错的措辞。
-  图片 caption 同样未入库。
+- **扫描件兜底已补上（2026-09-25，修改轮 A3.3）**：`ingest/ocr.py` 在「可抽文本 <50 字/页
+  且页面有图」时走本地 OCR（可选依赖 `--extra ocr` = rapidocr-onnxruntime，纯 pip；
+  不装则 ingest 明确点名「N 篇疑似扫描件未走兜底」，不静默）。`profile` 把 `scan_suspect`
+  拆成两类：公司语料实测（只读）92 篇 = **21 篇 scan_likely（有图无字，OCR 可兜底）+
+  71 篇 near_empty（无图少字，源文件问题）**——九成「疑似扫描件」其实不是扫描件。
+  公司语料按合规冻结不重跑（21 篇的兜底待合法的重新入库窗口）；合成示例语料的
+  4 篇扫描件已全链路可检索。图片 caption 仍未入库。
 - notebooks（接入对比 / 消融可视化）未做。
 - 全部结论可复现：复现命令逐条见 [PLAN §6](docs/design/PLAN.md)；commit 历史按决策粒度提交。
 

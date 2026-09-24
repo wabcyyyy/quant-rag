@@ -65,8 +65,10 @@ class HybridRetriever:
         {"category": "会议档案"} / {"doc_group": "办公会"}（消融 #5 的开关）。
 
         字段可用性是实测约束，不是想当然：默认入库只有 doc_date / category / doc_group
-        有值（doc_date 覆盖 211/1121 篇 = 18.8%），而 topics / attendees 必须走
-        `ingest --llm-meta` 才会被填上——默认配置下它们在全库为 0/3856。
+        有值（doc_date 覆盖率因语料与回填状态而异：公司语料周次回填后块级 62.5%、
+        示例语料 100%；任何过滤前先看当次 profile，别引用历史常数），而
+        topics / attendees 必须走 `ingest --llm-meta` 才会被填上——默认配置下它们
+        在全库为 0。
         """
         limit = top_n or int(self.cfg.get("fusion_limit", 12))
         mode = mode or self.cfg.get("mode", "hybrid")
