@@ -212,7 +212,21 @@ RAGAS 侧另记 `judge_model` `judge_base_url` `judge_cross_vendor` `judge_reaso
 
 ---
 
-## 11. 相关文档
+## 11. 冻结纪律与当前基线状态（2026-09-25 修改轮后）
+
+- **跨 `freeze_id` 禁止并排报数**：每份结果文件的 `meta.index_fp` / `meta.synth_fp`
+  自证它跑在哪个状态上；与冻结记录不匹配时 eval 会对**只相关的那一个**报警
+  （检索指标看 `index_fp`、答案指标看 `synth_fp`，依赖表见 PLAN §6.2）。
+  工具：`doc-rag freeze`（幂等）；「改了什么会作废什么」按 L0/L1/L2 分档。
+- **§8 的三条噪声地板全部待重测**：检索极差（±2 条/Hit@5 ±3.1pt）、faithfulness
+  ≥1.9pt、keypoint 3.10pt——三条都测于公司语料（v1 口径），修改轮已把底座重挂到
+  320 篇公开语料（PLAN §5.7），**这些常数不迁移**。下一轮 C 电池在同一 `freeze_id`
+  上重测替换；替换前，新底座上的任何读数只配横向比臂、不配下「是否变好」的结论。
+- 当前的参照读数 = PLAN §5.7 的阶段读数表（S0~S3 + A3.4 三臂，全部检索侧零 LLM）。
+
+---
+
+## 12. 相关文档
 
 - [design/PLAN.md](../design/PLAN.md) §5.3（判分与噪声）、§5.5（agentic 期的门槛与实测）——所有结果值与放行判定在这里
 - [architecture/system-design.md](../architecture/system-design.md) —— 这些指标背后的链路怎么跑
