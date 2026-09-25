@@ -31,6 +31,12 @@ data/eval/*.jsonl
 !data/eval/gold_core_agg.json
 # 例外：查询改写的泛化门禁集（全部指向 data/sample_raw 的虚构语料）
 !data/eval/rewrite_paraphrase.json
+# 例外：LLM 措辞鲁棒性臂（origin=llm_rephrase，问题措辞 LLM 生成、判据程序化继承；
+# 出处与协议在 map 的 meta——它是外部锚点的诚实替代，禁止当「真实用户分布」引用）
+!data/eval/gold_core_llm.json
+!data/eval/gold_core_llm_map.json
+# 重写工作目录（子代理原始产物，最终变体已在 map 里，本地留档）
+data/eval/_rephrase_work/
 # 外部基准数据（RGB）不入库：上游是 CC BY-NC-SA 4.0（非商用），副本不再分发。
 # 仓库里只留抓取脚本与 commit hash，数据由 `doc-rag bench-rgb-fetch` 本地拉。
 data/bench/

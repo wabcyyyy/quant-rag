@@ -84,7 +84,7 @@ docker compose up -d   # Qdrant :6333（镜像在 compose 里钉 v1.19.1，不�
 uv run doc-rag check   # 冒烟：LLM 连通 / Embedding 维度与 dense_dim 一致 / sparse 探测 / Qdrant 版本与钉版一致
 uv run doc-rag profile # Phase 0：语料画像（data/raw 放入语料后执行）
 uv run doc-rag ingest  # 双路接入 → data/parsed 统一中间 JSON
-uv run pytest          # 测试（431 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
+uv run pytest          # 测试（436 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
 uv run doc-rag check-rewrite  # 查询改写泛化门禁（真实调用模型，会花约 ¥0.01，并打印生效模型与逐次延迟）
 ```
 
@@ -127,7 +127,10 @@ uv run doc-rag query --stream "问题"           # CLI 流式输出
 碎化 PDF 4（每字符一行）、近空扫描件 4（无文本层，OCR 兜底对象）；`doc_date` 覆盖
 100%，聚合题判据用的归属人名全库唯一。配套公开黄金集（`scripts/make_gold_from_corpus.py`
 从语料事实清单程序化派生，零 LLM）：`gold_core.json` 74 条（消融全臂跑这档）与
-`gold_full.json` 198 条（只跑冻结配置）。
+`gold_full.json` 198 条（只跑冻结配置）。另有 LLM 措辞鲁棒性臂 `gold_core_llm.json`
+（148 条 = gold_core ×2 口语化变体，`origin=llm_rephrase`：问题措辞由子代理生成、
+判据程序化逐字段继承——**它不是外部锚点**，出处与协议见同目录 `gold_core_llm_map.json`；
+读数待冻结后与源集配对跑）。
 
 ```bash
 uv run python scripts/make_sample_corpus.py --scale 300   # 重新生成（确定性，sha256 幂等）
