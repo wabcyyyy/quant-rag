@@ -26,7 +26,7 @@
 |----|------|------|
 | 路线 | 自研薄编排层：重型轮子全用库，公司定制层自己写 | 不重复造轮子；贡献集中在文档特有定制，讲得清 |
 | 接入 | 飞书/Word 批量导出 PDF + doc(x)，手动迁入 data/raw | 不对接平台 API；增量靠重下 + sha256 去重 |
-| 文件解析 | doc/docx：LibreOffice headless + mammoth；PDF：PyMuPDF | born-digital 语料，轻依赖即可；MinerU 兜底**只是设计位**（画像把疑似扫描件标成 `scan_suspect`，但链路里没有 OCR，见 README 已知不足） |
+| 文件解析 | doc/docx：LibreOffice headless + mammoth；PDF：PyMuPDF | born-digital 语料，轻依赖即可；扫描件兜底**已接线**（A3.3，2026-09-25：`near_empty`/`scan` 走 rapidocr）；MinerU 仍是设计位（未实现，见 README 已知不足） |
 | 元数据抽取 | LLM 入库时抽取：日期、会议类型、参会人、议题、决议 | 会议记录的检索价值一半在元数据；300 份短文档抽取成本可忽略 |
 | 编排 | 自研 Pipeline（不引编排框架，模块边界清晰） | 解析/分块/评估全是深度定制，框架抽象碍事；agent 一期同样拍板自研薄循环，见 §5.5 F2 |
 | 存储 | Qdrant（Dense + 全文 BM25 双路） | Query API 原生 RRF 融合；单存储，几千份规模无压力 |
@@ -69,7 +69,7 @@
 **五条设计原则**
 
 1. **接入克制**：born-digital 简单版面快通道已够，不为想象中的难例引重依赖——MinerU 是条件触发；语料手动迁入，不对接平台 API。  
-2. **检索块 ≠ 合成块**：小块/句级召回，父块/窗口进 LLM。  
+2. **检索块 ≠ 合成块**：小块/句级召回，进 LLM 的上下文有独立预算（`min(max_contexts, rerank.top_n)`）。初版「父块/窗口进 LLM」是设计意图、**未交付**（§5.5：`parent_expand` 是已删的无人读键；唯一实现是 agent 期的 `read_window` 且 `agent.enabled: false`——2026-09-26 审查 N17 写回）。  
 3. **默认 Hybrid**：纯 Dense 搞不定条款号、文号、专名，Dense+BM25 双路是底线。  
 4. **引用可追溯**：答案 → `[1][2]` → `doc/page/block`。  
 5. **评估驱动**：改任何参数先跑黄金集，拒绝「感觉变好」。
@@ -158,7 +158,7 @@ Qdrant 侧为 `doc_id / page / block_type` 建 payload index，支撑元数据�
      → Dense top-k + BM25 top-k（Qdrant full-text，jieba 预分词）
      → RRF 融合 (k=60)
      → Rerank 取 5–8 块
-     → 扩父块 / 去重
+     → 上下文预算截断 min(max_contexts, rerank.top_n)（无父块扩展——§3 原则 2 为设计意图，未交付）
      → LLM：仅依据上下文 + 编号引用 + 不足则拒答
 ```
 
@@ -1098,6 +1098,11 @@ Faithfulness 差值从此不再有结论资格。
 `eval/runner.py` 两处），已经漂移到——FastAPI 两个端点根本不接重排，`/query` 连
 `max_contexts` 截断都没有。本轮做了什么：
 
+> **2026-09-26 补记（审查 N17）**：本节的自审对象是「管线内联漂移」；对抗审查又补了
+> 一类——**原则句/流程图 vs 实现**：§3 原则 2 与 §5.2 流程图宣称的「父块/窗口进 LLM」
+> 从未交付（**多报**），§3 原则 1 写「链路里没有 OCR」而 rapidocr 兜底已接线（**少报**）。
+> 五条原则两条漂移、方向相反。四处已写回（§3/§5.2/§7），这一类自此进自审清单。
+
 - **W1 编排收敛**：新增 `src/doc_rag/orchestrator.py`，唯一装配点。`Result` 同时携带
   `retrieved`（未截断，检索指标的分母）与 `contexts`（截断后，LLM 所见），两份清单
   不许合并。`tests/test_orchestrator_parity.py` 断言 `/query` / `/query/stream` / 演示页 /
@@ -1745,6 +1750,15 @@ ADR-0003（维持已关闭，无需改）。
   （照 ADR-0002 的延迟判读口径）；若最优点仍是 6，则维持 6 并把曲线留档，
   **「不换默认」同样是合格结论**。拍板后新默认写进 `configs/default.yaml`
   并按 §6.2 声明作废范围（L1：只作废答案侧）。
+  **双曲线同向（2026-09-26 拍板修订，审查 N8）**：全 31 条 argmax 与 K≥3 子集
+  （n=15）argmax **一致**才算定档；不一致则报「分辨率不足、不定档」——16/31 条
+  K=1（单条翻转 ≈3.2pt，与地板同量级），单曲线 argmax 不具备定档效力。
+  **地板先行（同批拍板）**：B5 三条噪声地板（`--repeat` + `--fresh-answers`）
+  先于 A4 七臂测出，argmax 才有噪声带可对照。
+  **路由前置已闭（2026-09-26 探针）**：新底座 `gold_core_agg` 聚合路由率实测
+  **30/31 = 0.968**（有效改写预测 30/30；`data/eval/results_20260926_002545.json`，
+  `meta.rewrite_routing` 自证）——七臂量到的确实是聚合路 + 预算，无需重命名或加
+  force 对照臂（审查 N8 第 (c) 坑闭合；K 分辨率与地板两坑由上面两条修订承接）。
 - **聚合题子集已标记**：`data/eval/gold_core_agg.json`（31 条 = cross_doc 15 +
   time_filter 16，keypoints K n=31 / min 1 / mean 2.42），扫线直接消费。
 
@@ -1972,7 +1986,7 @@ uv run doc-rag query --timing "关于供应商预付款，我们做过哪些决�
 
 ### Phase 2 — 优化与讲清（1–2 周）
 
-- Query 改写 + 实体/时间识别、元数据过滤、父块扩展、BGE Reranker、元数据全量字段（参会人/决议）  
+- Query 改写 + 实体/时间识别、元数据过滤、父块扩展（**未交付**——本节是初版排期存档；该设计意图见 §5.5 的核算）、BGE Reranker、元数据全量字段（参会人/决议）  
 - 跑完消融（含 Dense vs +BM25 vs +Sparse 三组检索对比），图表进 README  
 - FastAPI；可选 Gradio 上传+对话+引用  
 - README 工程文档定稿  

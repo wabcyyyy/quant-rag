@@ -13,8 +13,14 @@
 #   bash scripts/agg_budget_sweep.sh                 # 全量 7 臂（真实合成计费）
 #   bash scripts/agg_budget_sweep.sh --smoke         # 冒烟：--limit 1 --retrieval-only，¥0
 #
-# 拍板规则（先于看数写定，PLAN §5.7）：选「聚合端到端 p95 ≤5s 约束下 keypoint_recall
-# 最高的那档」；若最优点仍是 6，则维持 6 并把曲线留档——这同样是合格结论。
+# 拍板规则（先于看数写定，PLAN §5.7；2026-09-26 修订为双曲线同向）：
+#   1) 每档取「聚合端到端 p95 ≤5s 约束下的 keypoint_recall」；
+#   2) 全 31 条 argmax 与 K≥3 子集（n=15）argmax **一致**才算定档；不一致 = 分辨率
+#      不足、不定档（16/31 条 K=1，单条翻转 ≈3.2pt，与噪声地板同量级）；
+#   3) 地板先行：B5 三条噪声地板（--repeat --fresh-answers）先测，argmax 才有
+#      噪声带可对照；
+#   4) 若最优点仍是 6，维持 6 并把曲线留档——这同样是合格结论。
+# 路由前置已闭（2026-09-26 探针）：新底座聚合路由率 30/31=0.968，七臂量的确实是聚合路。
 
 set -euo pipefail
 

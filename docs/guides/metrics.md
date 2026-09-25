@@ -138,7 +138,10 @@
 
 - 分项：`rewrite` / `retrieve` / `rerank` / `retrieval_total`（不含 LLM）/ `synthesize` / `total`，
   外加 `synth_cached` 标记。汇总给 p50 / p95 / max，并**分题型**各算一份。
-- SLO：全量端到端 `target_p95_ms = 8000`；现行口径是分题型——聚合 ≤5s、短答 ≤8s。
+- SLO：分题型——聚合（cross_doc/time_filter）p95 ≤5s、短答（其余）≤8s。机器可读字段是
+  `latency.slo`（2026-09-26 起；样本只取未命中缓存的条目，且本轮无缓存污染、带答案才给
+  `meets` 判定，否则 `None`——「没测」≠「达标」）。旧的全局 `target_p95_ms`/`p95_meets_target`
+  用的是已废弃口径，已删除，历史结果文件里的该字段不再有消费方。
 - **三条纪律**：
   1. 延迟必须 `--fresh-answers` 关缓存测。缓存命中的合成是毫秒级，不是延迟。
   2. 端到端读数**必须先对 `retrieve` 分项**：该分项实测有 62~127s 量级的端点停顿
