@@ -21,7 +21,11 @@
 2. source_doc_ids 在 manifest 中真实存在；
 3. no_answer 词全库不出现；
 4. cross_doc 锚点人名不出现在非来源文档（判据零噪声）；
-5. 两档的题型分布（cross_doc / time_filter 各 ≥15）与 id 唯一性。
+5. 两档的题型分布（cross_doc / time_filter 各 ≥15）与 id 唯一性；
+6. must_contain / key_points 短语必须落在某个 **chunk** 里（当前 structural 分块
+   的被索引文本）——「在解析文本里」≠「可被检索」：分块器丢字（N1）、标题不进
+   块正文都会让短语在索引里零出现，判据永远够不着。此检查只准加严、不许为过检
+   而弱化；失败时逐条报出不可检索的短语。
 
 运行：uv run python scripts/make_gold_from_corpus.py
 """
@@ -408,8 +412,13 @@ def verify(
     sets: dict[str, list[dict]],
     manifest: dict,
     text_by_file: dict[str, str],
+    chunks_by_file: dict[str, list[str]],
 ) -> list[str]:
-    """五道自检，返回（失败清单, 待 OCR 复核清单）。"""
+    """六道自检，返回（失败清单, 待 OCR 复核清单）。
+
+    `chunks_by_file`（文件名 → 该文档 structural 分块的块文本列表）必传：
+    自检 #6 不许被绕过。
+    """
     failures: list[str] = []
     ocr_pending: list[str] = []
     docs = manifest["docs"]
@@ -450,14 +459,36 @@ def verify(
                     failures.append(
                         f"{item['id']}({item['type']}): must_contain「{kw}」未逐字命中"
                     )
+                # 自检 #6（N1 护栏）：解析文本里有 ≠ 可检索。短语必须落在某个
+                # chunk 里——分块器丢字、标题只进 section_path 不进块正文，都会
+                # 让短语在被索引文本里零出现，检索永远够不着（q019/q020 类缺陷）。
+                if chunks_by_file is not None and files:
+                    hit = any(
+                        _norm(kw) in _norm(ct)
+                        for f in files
+                        for ct in chunks_by_file.get(f, [])
+                    )
+                    if not hit:
+                        failures.append(
+                            f"{item['id']}({item['type']}): must_contain「{kw}」"
+                            "不在来源文档的任何 chunk 里（不可检索）"
+                        )
             for kp in item["key_points"]:
                 f = next(
                     (x for x, did in doc_id_of.items() if did == kp["doc_id"]), None
                 )
                 if f is None:
                     failures.append(f"{item['id']}: keypoint doc_id 不存在")
-                elif _norm(kp["phrase"]) not in _norm(text_by_file[f]):
+                    continue
+                if _norm(kp["phrase"]) not in _norm(text_by_file[f]):
                     failures.append(f"{item['id']}: keypoint 短语未逐字命中 {f}")
+                if chunks_by_file is not None:
+                    kps = chunks_by_file.get(f) or []
+                    if kps and not any(_norm(kp["phrase"]) in _norm(ct) for ct in kps):
+                        failures.append(
+                            f"{item['id']}: keypoint 短语不在 {f} 的任何 chunk 里"
+                            "（不可检索）"
+                        )
             # cross_doc 锚点检查分两种：人名锚点不得溢出；话题锚点的来源集
             # 必须 = 全部含词文档（漏一篇就会把正确检索判成错）。
             if item["type"] == "cross_doc":
@@ -534,11 +565,17 @@ def main() -> None:
     title_of = {d["doc_id"]: d["title"] for d in manifest["docs"]}
 
     # 解析往返：全库解析一遍（话题锚点的「全部含词文档」来源集与判据命中检查的前提）
+    from doc_rag.ingest.chunker import chunk_document
     from doc_rag.ingest.pdf import extract_pdf
 
-    text_by_file = {
-        d["file"]: extract_pdf(ROOT / "data" / "sample_raw" / d["file"]).to_text()
+    parsed_docs = {
+        d["file"]: extract_pdf(ROOT / "data" / "sample_raw" / d["file"])
         for d in manifest["docs"]
+    }
+    text_by_file = {f: doc.to_text() for f, doc in parsed_docs.items()}
+    # 自检 #6 的输入：与 ingest 同一条默认 structural 分块路径的块文本
+    chunks_by_file = {
+        f: [c.text for c in chunk_document(doc)] for f, doc in parsed_docs.items()
     }
 
     questions = build_question_pool(manifest, text_by_file)
@@ -549,7 +586,7 @@ def main() -> None:
     full_items = finalize(full, "f", doc_id_of)
 
     sets = {"core": core_items, "full": full_items}
-    failures, ocr_pending = verify(sets, manifest, text_by_file)
+    failures, ocr_pending = verify(sets, manifest, text_by_file, chunks_by_file)
     if failures:
         print("\n".join(f"FAIL {f}" for f in failures[:40]))
         raise SystemExit(1)

@@ -266,12 +266,47 @@ def test_latency_summary_by_type_exposes_the_tail():
     assert lat["by_type"]["fact"]["answer_chars_mean"] == 1.0
 
 
-def test_latency_summary_target_verdict_tracks_p95():
-    fast = _latency_summary([_item("q1", "fact", "a", 1000.0, False)])
-    slow = _latency_summary([_item("q1", "cross_doc", "a", 30000.0, False)])
-    assert fast["p95_meets_target"] is True
-    assert slow["p95_meets_target"] is False
-    assert fast["target_p95_ms"] == 8000
+def test_latency_slo_per_type_verdicts():
+    """N7：SLO 是分题型的——聚合（cross_doc+time_filter）≤5s、短答（其余）≤8s。
+
+    旧的 `p95_meets_target` 用已废弃的全局 8s 口径且样本不过滤缓存，被本测试的
+    旧版本把旧语义钉住；新字段分桶判定且样本只取未命中缓存的条目。
+    """
+    rows = [
+        _item("q1", "fact", "a", 1000.0, False, total_ms=1251.0),
+        _item("q2", "cross_doc", "a", 30000.0, False, total_ms=30251.0),
+    ]
+    lat = _latency_summary(rows, with_answers=True)
+    slo = lat["latency_slo"]
+    assert slo["computed_on"] == "uncached_only"
+    assert slo["with_answers"] is True
+    assert slo["aggregate"]["target_ms"] == 5000
+    assert slo["aggregate"]["p95"] == 30251.0
+    assert slo["aggregate"]["meets"] is False  # 30s 聚合题超 5s 目标
+    assert slo["short"]["target_ms"] == 8000
+    assert slo["short"]["p95"] == 1251.0
+    assert slo["short"]["meets"] is True
+    # 旧字段必须退场：恒真的全局布尔不再有位置
+    assert "p95_meets_target" not in lat
+    assert "target_p95_ms" not in lat
+
+
+def test_latency_slo_is_none_when_cache_contaminated():
+    """缓存污染的运行不许给 SLO 判定：达标必须是「没测≠达标」的 None。"""
+    rows = [_item("q1", "fact", "a", 2.0, True, total_ms=253.0)]
+    lat = _latency_summary(rows, with_answers=True)
+    slo = lat["latency_slo"]
+    assert lat["cache_contaminated"] is True
+    assert slo["short"]["meets"] is None
+    assert slo["short"]["p95"] is None  # 样本只取未命中缓存：无样本
+
+
+def test_latency_slo_is_none_for_retrieval_only():
+    """纯检索运行没有端到端延迟可言：meets 必须是 None（旧实现会印 ✓ 达标）。"""
+    rows = [_item("q1", "fact", "a", None, None, total_ms=251.0)]
+    lat = _latency_summary(rows, with_answers=False)
+    assert lat["latency_slo"]["with_answers"] is False
+    assert lat["latency_slo"]["short"]["meets"] is None
 
 
 def test_latency_summary_empty_without_timing():

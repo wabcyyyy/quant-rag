@@ -130,6 +130,22 @@ def test_failed_item_excluded_from_denominator(tmp_path, monkeypatch):
     assert results["summary"]["strict_keyword_accuracy"] == 1.0
 
 
+def test_failed_item_excluded_from_hit_and_mrr_denominator(tmp_path, monkeypatch):
+    """N2：失败条不得进 hit_at_5/mrr 的分母（`_error_row` docstring 承诺的全剔语义）。
+
+    3 条题 1 条抛异常：q1/q3 都命中 → hit 与 mrr 都应是 1.0（分母 2）。
+    旧实现只按拒答题过滤、不剔 error 行 → 失败条 first_hit_rank=None 被当 miss，
+    hit_at_5 = mrr = 0.6667，与同文件里覆盖率/nDCG 的分母（剔除失败）自相矛盾。
+    """
+    orch = _FakeOrch(fail_on={"问题2"})
+    _patch(monkeypatch, orch)
+    results = eval_runner.evaluate(_gold(tmp_path), cfg=_cfg())
+    assert results["summary"]["n_errors"] == 1
+    assert results["summary"]["hit_at_5"] == 1.0
+    assert results["summary"]["mrr"] == 1.0
+    # 与派生侧（compare.py `_retrieval_value` 丢 error 行）重新一致：两侧同分母
+
+
 def test_resume_only_reruns_incomplete(tmp_path, monkeypatch):
     out = tmp_path / "run.json"
     orch1 = _FakeOrch(fail_on={"问题2"})

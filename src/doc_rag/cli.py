@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -55,10 +55,20 @@ def _print_latency(lat: dict | None) -> None:
     )
     typer.echo(f"延迟合成        : {_fmt_q(lat.get('synthesize'))}")
     total = lat.get("total") or {}
-    mark = "✓ 达标" if lat.get("p95_meets_target") else "✗ 超目标"
-    typer.echo(
-        f"延迟端到端      : {_fmt_q(total)}  ← 目标 p95 ≤ {lat.get('target_p95_ms')}ms {mark}"
-    )
+    typer.echo(f"延迟端到端      : {_fmt_q(total)}（混合值，判定看下面分桶 SLO）")
+    # N7：SLO 是分题型的（聚合 ≤5s、短答 ≤8s），样本只取未命中缓存的条目；
+    # 「没测」（缓存污染 / 纯检索）= None，不许再印成 ✓ 达标
+    slo = lat.get("latency_slo") or {}
+    for bucket, label in (("aggregate", "聚合≤5s"), ("short", "短答≤8s")):
+        b = slo.get(bucket) or {}
+        if not b:
+            continue
+        meets = b.get("meets")
+        mark = "✓ 达标" if meets is True else ("✗ 超标" if meets is False else "— 未测")
+        typer.echo(
+            f"  SLO {label:<8}: p95 {b.get('p95')}ms / 目标 ≤{b.get('target_ms')}ms"
+            f"（未缓存 n={b.get('n_uncached')}） {mark}"
+        )
     for t, row in (lat.get("by_type") or {}).items():
         syn, tot = row.get("synthesize") or {}, row.get("total") or {}
         typer.echo(
@@ -1101,30 +1111,40 @@ def evaluate(
         typer.echo(f"--resume 指定的文件不存在：{resume}")
         raise typer.Exit(1)
 
+    # 两分支共用同一份参数（N12）：各写一份参数集没有同源约束，漂移无告警——
+    # repeat 分支漏传 resume_from 导致 `--repeat 3 --resume X` 静默重跑重付，
+    # 正是这么发生的。共用 dict 之后，新增参数两分支必然同时拿到。
+    eval_kwargs: dict[str, Any] = {
+        "collection": kb,
+        "top_n": top_n,
+        "limit": limit,
+        "with_ragas": ragas,
+        "with_answers": not retrieval_only,
+        "mode": mode,
+        "agent_mode": agent_mode or None,
+        "aggregate": aggregate,
+        "use_rewrite": rewrite,
+        "use_rerank": rerank,
+        "honor_rewrite_budget": honor_rewrite_budget,
+        "sample": sample,
+        "require_citation": not no_citation_constraint,
+        "ragas_sample": ragas_sample,
+        "use_judge_cache": not fresh_judge,
+        "judge_over": judge_over,
+        "holdout": holdout,
+    }
     if repeat > 1:
         from doc_rag.eval.runner import evaluate_with_repeat
 
+        # resume 只由 runner 内部给第 1 遍（第 2 遍起也 resume 会让 repeat_span
+        # 塌成 0）；progress_file 不传——repeat 模式的落盘走下方兜底写 merged
+        # （含 repeat_span），逐遍覆盖会把它顶掉。
         results = evaluate_with_repeat(
             gold_file,
             cfg=cfg,
             repeat=repeat,
-            collection=kb,
-            top_n=top_n,
-            limit=limit,
-            with_ragas=ragas,
-            with_answers=not retrieval_only,
-            mode=mode,
-            agent_mode=agent_mode or None,
-            aggregate=aggregate,
-            use_rewrite=rewrite,
-            use_rerank=rerank,
-            honor_rewrite_budget=honor_rewrite_budget,
-            sample=sample,
-            require_citation=not no_citation_constraint,
-            ragas_sample=ragas_sample,
-            use_judge_cache=not fresh_judge,
-            judge_over=judge_over,
-            holdout=holdout,
+            **eval_kwargs,
+            resume_from=resume,
         )
         span = results["summary"].get("repeat_span") or {}
         typer.echo(
@@ -1135,25 +1155,9 @@ def evaluate(
         results = run_eval(
             gold_file,
             cfg=cfg,
-            collection=kb,
-            top_n=top_n,
-            limit=limit,
-            with_ragas=ragas,
-            with_answers=not retrieval_only,
-            mode=mode,
-            agent_mode=agent_mode or None,
-            aggregate=aggregate,
-            use_rewrite=rewrite,
-            use_rerank=rerank,
-            honor_rewrite_budget=honor_rewrite_budget,
-            sample=sample,
-            require_citation=not no_citation_constraint,
-            ragas_sample=ragas_sample,
-            use_judge_cache=not fresh_judge,
-            judge_over=judge_over,
+            **eval_kwargs,
             resume_from=resume,
             progress_file=out_file,
-            holdout=holdout,
         )
     s = results["summary"]
     typer.echo(

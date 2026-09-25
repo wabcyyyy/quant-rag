@@ -207,6 +207,15 @@ def load_scores(path: str | Path, metric: str | None = None) -> dict:
     """
     p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))
+    # N13：`_flush_progress` 逐条落盘的中间态（meta.partial=true）与完整结果同形，
+    # 而被 kill 的运行留下的 hit_at_5 还是 N2 修的那种被 error 行污染的数——
+    # 报告路径见 partial 必须拒绝判读。`resume_from`（runner）**不查**这个字段：
+    # 它必须能读中间态补跑（B2），别把续跑一起锁死。
+    if (data.get("meta") or {}).get("partial") is True:
+        raise ValueError(
+            f"{p.name} 是逐条 flush 的中间态（meta.partial=true，未跑完）——"
+            "不能当完整结果判读。先用 eval --resume 补齐，再出报告。"
+        )
     # 旧名回落成标准名：PLAN/README 里已经写下的复现命令（`--metric
     # keypoint_hit_ratio`、`coverage_vs_ceiling`）不因改名失效。
     if metric:

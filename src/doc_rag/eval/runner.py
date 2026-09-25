@@ -308,6 +308,38 @@ def _error_row(item: GoldItem, exc: Exception) -> dict:
     }
 
 
+#: 聚合题型：改写器「该不该走聚合路」的 gold 判据就是真题型落在这两类的成员关系
+_AGG_TYPES = ("cross_doc", "time_filter")
+
+
+def _routing_stats(rows: list[dict]) -> dict:
+    """改写器聚合路由 vs 真题型的混淆统计（N15：零 LLM，字段早已落盘）。
+
+    recall = 该走聚合路（gold 为聚合题型）的条目里预测了聚合的占比；
+    false_trigger = 不该走的条目里误触发的占比。gold 无聚合题时 recall 无定义
+    （返回 None，不印 0）；全聚合集时 false_trigger 同理。
+    """
+    n = len(rows)
+    pred = sum(1 for r in rows if r.get("rewrite_aggregate"))
+    gold = sum(1 for r in rows if r["type"] in _AGG_TYPES)
+    pred_and_gold = sum(
+        1 for r in rows if r.get("rewrite_aggregate") and r["type"] in _AGG_TYPES
+    )
+    matches = sum(
+        1 for r in rows if bool(r.get("rewrite_aggregate")) == (r["type"] in _AGG_TYPES)
+    )
+    return {
+        "n": n,
+        "agg_predicted": pred,
+        "agg_gold": gold,
+        "matches": matches,
+        "recall": round(pred_and_gold / gold, 4) if gold else None,
+        "false_trigger": round((pred - pred_and_gold) / (n - gold), 4)
+        if n - gold
+        else None,
+    }
+
+
 def evaluate(
     gold_file: Path,
     cfg: dict | None = None,
@@ -352,8 +384,43 @@ def evaluate(
     n_resumed = 0
     if resume_from is not None:
         prior = json.loads(Path(resume_from).read_text(encoding="utf-8"))
+        # N11：provenance 全等校验。判据不能只是「id 存在且无 error」——那会
+        # 把状态 A 的条目拼进 meta 自称状态 B 的结果文件（compare 等长护栏、
+        # freeze_warnings、RAGAS 上下文重放全会基于错误的 meta 放行）。judge 侧
+        # 早有同类闸门（上下文无法按原样复现即拒判），这里对齐。gold sha 已内含
+        # 于 synth_fp（freeze.compute_synth_fp），不单列。
+        from .. import freeze as freeze_mod
+        from .. import index_identity
+
+        pmeta = prior.get("meta") or {}
+        llm_sec = cfg.get("llm") or {}
+        prompt_version_now = (
+            llm_sec.get("prompt_version") or prompts.DEFAULT_PROMPT_VERSION
+        )
+        expected = {
+            "index_fp": index_identity.identity_for(retriever.collection),
+            "synth_fp": freeze_mod.compute_synth_fp(cfg, gold_file),
+            "collection": retriever.collection,
+            "prompt_fingerprint": (
+                prompts.fingerprint(prompt_version_now) if with_answers else None
+            ),
+        }
+        mismatched = {
+            k: (pmeta.get(k), v) for k, v in expected.items() if pmeta.get(k) != v
+        }
+        if mismatched:
+            detail = "；".join(
+                f"{k}（文件={a!r} ≠ 本轮={b!r}）" for k, (a, b) in mismatched.items()
+            )
+            raise ValueError(
+                f"--resume 的来源文件与本轮状态不一致：{detail}——继续会产出"
+                "「items 来自状态 A、meta 自称状态 B」的结果。请改用同一状态的"
+                "结果文件 resume，或去掉 --resume 全量重跑。"
+            )
         resume_done = {
-            it["id"]: it for it in prior.get("items", []) if not it.get("error")
+            it["id"]: {**it, "resumed_from": Path(resume_from).name}
+            for it in prior.get("items", [])
+            if not it.get("error")
         }
 
     def _flush_progress(meta_partial: dict) -> None:
@@ -575,8 +642,14 @@ def evaluate(
             }
         )
 
-    # 聚合（no_answer 题无来源文档，不计入分母，由 refusal_acc 单独评）
-    with_source = [r for r in per_item if not _is_refusable(items, r["id"])]
+    # 聚合（no_answer 题无来源文档，不计入分母，由 refusal_acc 单独评）。
+    # error 行也必须剔出分母（N2）：`_error_row` 的承诺是「没测出不冒充 0」，而
+    # first_hit_rank=None 的行若留在分母里就是被当 miss 计——与覆盖率/nDCG 的
+    # `is not None` 过滤形成同一份文件两套分母。compare 派生侧（`_retrieval_value`
+    # 对 None 返回 None）本来就把它们整条丢出配对集合，改完两侧才重新一致。
+    with_source = [
+        r for r in per_item if not _is_refusable(items, r["id"]) and not r.get("error")
+    ]
     mrr_scores = [1.0 / r["first_hit_rank"] for r in with_source if r["first_hit_rank"]]
     ndcg_scores = [r["ndcg_at_8"] for r in with_source if r["ndcg_at_8"] is not None]
     covs = [r["doc_coverage"] for r in per_item if r["doc_coverage"] is not None]
@@ -750,7 +823,7 @@ def evaluate(
     for _legacy, _canonical in LEGACY_SUMMARY_KEYS.items():
         if _canonical in summary:
             summary[_legacy] = summary[_canonical]
-    latency = _latency_summary(per_item)
+    latency = _latency_summary(per_item, with_answers=with_answers)
     if latency:
         summary["latency"] = latency
 
@@ -816,6 +889,31 @@ def evaluate(
     # 一条自称「带元数据过滤」的臂里混进 N 条没过滤的条目，覆盖率就不是那个机制的
     # 效果了——和 rerank_failed / rewrite_degraded 是同一类自证。
     filter_fallback_n = sum(1 for r in per_item if r.get("filter_fallback"))
+
+    # N15：路由自证。`rewrite_aggregate`（改写器预测）与真题型都已逐条落盘，
+    # 匹配率是零 LLM 的——但没有这个字段，A4 读数就无法自证「题真的走了聚合路」
+    # （RGB zh_int 的头条数字曾建立在 12/100 路由臂上）。退化条与失败条没有
+    # 「预测」可言，不进分母（n 使样本量可见）。
+    routing_meta: dict | None = None
+    if use_rewrite and per_item:
+        routed_rows = [
+            r
+            for r in per_item
+            if r.get("rewrite_aggregate") is not None
+            and not r.get("rewrite_degraded")
+            and not r.get("error")
+        ]
+        routing_meta = {
+            "note": (
+                "预测=items.rewrite_aggregate（改写器；退化/失败条不进分母），"
+                "gold=真题型 ∈ (cross_doc, time_filter)"
+            ),
+            **_routing_stats(routed_rows),
+            "by_type": {
+                t: _routing_stats([r for r in routed_rows if r["type"] == t])
+                for t in sorted({r["type"] for r in routed_rows})
+            },
+        }
 
     # B10：meta 带当前双指纹 + 对相关指纹的冻结对照警告（无 freeze 记录 → 静默）。
     from .. import freeze as freeze_mod
@@ -903,6 +1001,8 @@ def evaluate(
             # （改写可以与合成不同源，只记 llm_model 会把改写的归属记错）
             "rewrite_degraded": rewrite_degraded if use_rewrite else None,
             "rewrite_model": endpoint_model(cfg) if use_rewrite else None,
+            # 路由自证（N15）：不开 rewrite 时为 None——没有「预测」就不报空统计
+            "rewrite_routing": routing_meta,
             # 有多少条其实没带着过滤跑完（0 才是干净的「过滤生效」臂）
             "filter_fallback_n": filter_fallback_n,
             "filters_applied_n": sum(1 for r in per_item if r.get("filter_applied")),
@@ -959,7 +1059,33 @@ def evaluate_with_repeat(
     """
     if repeat < 1:
         raise ValueError(f"--repeat 必须 ≥1，得到 {repeat}")
-    runs = [evaluate(gold_file, cfg=cfg, **kwargs) for _ in range(repeat)]  # type: ignore[arg-type]
+    # N9：答案侧缓存闸门。不加 --fresh-answers 时第 2 遍起答案全部命中缓存，
+    # repeat_span 塌成 0.0000 还会被当「关键极差」打印——把噪声地板测成零，
+    # 下一轮就会拿着「地板=0」给真差异下结论。judge 侧对同类风险是硬拒
+    # （_run_ragas 的缓存初始化失败），答案侧只提醒是不一致，这里对齐。
+    if (
+        repeat > 1
+        and kwargs.get("with_answers")
+        and cache_enabled((cfg or load_config()).get("llm"))
+    ):
+        raise ValueError(
+            "--repeat ≥2 与合成缓存不能同开：第 2 遍起答案全部命中缓存，"
+            "repeat_span 会塌成 0（假地板）。加 --fresh-answers 关缓存重跑"
+            "（检索侧地板不经此闸：with_answers=False 时缓存本来就不参与）。"
+        )
+    # N12：resume / progress_file 只给第 1 遍。第 2 遍起若也 resume 同一份文件，
+    # 全部条目被复用、极差恒为 0——量出来的不是噪声而是复用；progress_file
+    # 逐遍覆盖会把 merged（含 repeat_span）顶掉，repeat 模式的落盘由 CLI 兜底写。
+    resume_only = ("resume_from", "progress_file")
+    plain_kwargs = {k: v for k, v in kwargs.items() if k not in resume_only}
+    runs = [
+        evaluate(
+            gold_file,
+            cfg=cfg,
+            **(kwargs if i == 0 else plain_kwargs),  # type: ignore[arg-type]
+        )
+        for i in range(repeat)
+    ]
     first = runs[0]
     if repeat == 1:
         return first
@@ -1009,7 +1135,7 @@ def _quantiles(values: list[float], ns: tuple[float, ...] = (50, 95)) -> dict:
     return out
 
 
-def _latency_summary(per_item: list[dict]) -> dict | None:
+def _latency_summary(per_item: list[dict], with_answers: bool = True) -> dict | None:
     """按阶段汇总延迟 + 按题型拆分合成与端到端。
 
     按题型拆分不是装饰：本语料的延迟是**双峰**的——短答案（fact/term）约 2~3s，
@@ -1052,10 +1178,39 @@ def _latency_summary(per_item: list[dict]) -> dict | None:
             k: sum(int(u.get(k) or 0) for u in usage_rows)
             for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens")
         }
-    # 端到端是否达标：PLAN 目标 P95 ≤ 8s（用全量 total，含缓存命中的快条目）
-    e2e = summary["total"]
-    summary["target_p95_ms"] = 8000
-    summary["p95_meets_target"] = bool(e2e) and e2e.get("p95", 0) <= 8000
+
+    # 分题型 SLO（N7）：全局 8s 口径已废弃（README「现行口径是分题型——聚合 ≤5s、
+    # 短答 ≤8s」；metrics.md §6.2），且旧字段样本不过滤缓存命中——一个 44/63 命中
+    # 缓存的运行、一个纯检索运行都打印「达标」。三条规定一起落地：样本只取未命中
+    # 缓存的条目（与合成分位数同口径）；判 meets 前要求本轮无缓存污染且带答案，
+    # 否则 None（「没测」≠「达标」，恒真的布尔比偏高的布尔更糟）。
+    def _slo_bucket(target_ms: int, agg_bucket: bool) -> dict:
+        types = _AGG_TYPES if agg_bucket else None
+        sub = [
+            r
+            for r in uncached
+            if (r["type"] in types if agg_bucket else r["type"] not in _AGG_TYPES)
+        ]
+        q = _quantiles([r["latency"].get("total") for r in sub])
+        p95 = q.get("p95")
+        measurable = not summary["cache_contaminated"] and with_answers
+        meets = p95 <= target_ms if (measurable and p95 is not None) else None
+        return {
+            "target_ms": target_ms,
+            "types": list(_AGG_TYPES)
+            if agg_bucket
+            else sorted({r["type"] for r in sub}),
+            "n_uncached": len(sub),
+            "p95": p95,
+            "meets": meets,
+        }
+
+    summary["latency_slo"] = {
+        "computed_on": "uncached_only",
+        "with_answers": with_answers,
+        "aggregate": _slo_bucket(5000, agg_bucket=True),
+        "short": _slo_bucket(8000, agg_bucket=False),
+    }
     for t in sorted({r["type"] for r in rows}):
         sub = [r for r in rows if r["type"] == t]
         sub_uncached = [r for r in uncached if r["type"] == t]
@@ -1201,6 +1356,86 @@ def _judge_identity(cfg: dict, judge: dict | None) -> dict:
     }
 
 
+class RagasMissingError(RuntimeError):
+    """RAGAS 判分缺失率超阈值：幸存者均值不许冒充全量结论（N6）。"""
+
+
+def _ragas_max_missing_rate(cfg: dict) -> float:
+    """判分缺失率阈值（eval.ragas_max_missing_rate，默认 0.2）。"""
+    raw = (cfg.get("eval") or {}).get("ragas_max_missing_rate")
+    return 0.2 if raw is None else float(raw)
+
+
+def _ragas_score_audit(
+    per_item: list[dict], metrics: list, max_missing_rate: float
+) -> dict:
+    """判分缺失审计：n_scored / n_missing（按题型分层），超阈值硬拒出结论。
+
+    pandas 的 mean 默认 skipna：超时/失败的条目被静默剔出均值，而 `summary.n`
+    仍报请求条数（实锤 `ragas_qwen_trial6.json`：n=6 而 faithfulness=1.0 是 5 条
+    的均值，by_type 里 time_filter 整类消失）。当年靠人工核对题型分布才发现
+    （configs/default.yaml:207-210 的教训），这里把它变成机制：缺失集中在单一
+    题型时整体率会被分母稀释掉，所以题型层单独设闸（只对 n≥5 的层生效——
+    小样本不为加戏而拒，按整体率判）。
+    """
+    scored: dict[str, int] = {}
+    missing: dict[str, int] = {}
+    rate: dict[str, float] = {}
+    missing_by_type: dict[str, int] = {}
+    offenders: list[str] = []
+    for m in metrics:
+        name = m.name
+        vals = [r.get(name) for r in per_item if name in r]
+        n = len(vals)
+        n_scored = sum(1 for v in vals if v is not None)
+        n_missing = n - n_scored
+        scored[name] = n_scored
+        missing[name] = n_missing
+        if not n:
+            continue
+        rate[name] = round(n_missing / n, 4)
+        if n_missing and rate[name] > max_missing_rate:
+            offenders.append(
+                f"{name} 整体缺失 {n_missing}/{n}（{rate[name]:.0%} > {max_missing_rate:.0%}）"
+            )
+        for r in per_item:
+            if name in r and r.get(name) is None:
+                key = f"{name}:{r['type']}"
+                missing_by_type[key] = missing_by_type.get(key, 0) + 1
+        by_type_n: dict[str, int] = {}
+        for r in per_item:
+            if name in r:
+                by_type_n[r["type"]] = by_type_n.get(r["type"], 0) + 1
+        for t, tn in sorted(by_type_n.items()):
+            if tn < 5:
+                continue
+            tm = sum(
+                1
+                for r in per_item
+                if name in r and r["type"] == t and r.get(name) is None
+            )
+            if tm and tm / tn > max_missing_rate:
+                offenders.append(
+                    f"{name} 在题型 {t} 上缺失 {tm}/{tn}"
+                    f"（{tm / tn:.0%} > {max_missing_rate:.0%}）——"
+                    "缺失集中在同一题型，均值被幸存者拉高"
+                )
+    audit = {
+        "n_scored": scored,
+        "n_missing": missing,
+        "missing_rate": rate,
+        "n_missing_by_type": dict(sorted(missing_by_type.items())),
+    }
+    if offenders:
+        raise RagasMissingError(
+            "RAGAS 判分缺失率超阈值，拒绝出结论（幸存者均值≠全量均值）："
+            + "；".join(offenders)
+            + "。请提高 eval.judge.timeout_s 或修复 judge 端点后重判，"
+            "不要带着缺失出数。"
+        )
+    return audit
+
+
 def _run_ragas(
     rows: list[dict],
     cfg: dict,
@@ -1328,6 +1563,15 @@ def _run_ragas(
         for m in metrics:
             if m.name in df.columns:
                 summary[m.name] = round(float(df[m.name].mean()), 4)
+        # N6：均值可能只是幸存者均值（pandas skipna）。n 注明是请求条数，
+        # 实际分母与缺失去向随 summary 自证；超阈值直接拒（见下）
+        summary["n_note"] = (
+            "n = 请求判分的条数（含未判出的）；均值的实际分母见 n_scored，"
+            "缺失去向按题型见 n_missing_by_type"
+        )
+        summary.update(
+            _ragas_score_audit(per_item, metrics, _ragas_max_missing_rate(cfg))
+        )
         summary["per_item"] = per_item
         # 分题型均值：抽样偏置最容易在题型维度暴露（聚合题上下文最长、最易失分）
         by_type: dict[str, list[float]] = {}
@@ -1340,6 +1584,8 @@ def _run_ragas(
             k: round(sum(v) / len(v), 4) for k, v in sorted(by_type.items())
         }
         return summary
+    except RagasMissingError:
+        raise  # 审计的硬拒不许被下面的兜底吞成 {"error": ...}——那仍是静默
     except Exception as exc:  # noqa: BLE001
         return {"error": f"ragas 运行失败：{exc}"}
 
