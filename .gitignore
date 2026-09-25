@@ -59,3 +59,17 @@ docs/**
 
 # ZCode 会话产物
 .zcode/
+
+# 本地环境/工具件（不入库：.trellis 在本仓库不存在，规则仅本机 Trellis 用）
+.gitattributes
+AGENTS.md
+.agents/
+.claude/
+.zcodeignore
+learn/
+
+# 本地派生数据与个人判定材料
+data/feishu/
+data/profile_split.json
+# 人工核对卷：判定出自作者本人手，属个人材料（流程见 docs/ops/）
+data/eval/gold_review_worksheet.md
