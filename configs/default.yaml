@@ -176,12 +176,12 @@ metadata_extraction:
 contextual:
   # A3.4 contextual retrieval（ADR-0004）：入库时为每个 chunk 生成上下文前缀
   # （这个片段讨论什么、在文档什么位置），拼在被索引文本最前再嵌入/分词。
-  # **默认 false，改动它 = 作废全部检索基线（L2 全作废）**；是否转正默认待用户
-  # 拍板（SPEC U3）。评估臂走 `ingest --ctx both|bm25`：
+  # **默认 true（2026-09-25 U3① 转正拍板，用户按 ADR-0004 读数委托执行）**；
+  # 改动它 = 作废全部检索基线（L2 全作废）。评估臂仍可走 `ingest --ctx off|bm25`：
   #   both = 前缀进 dense 与 BM25 双路；bm25 = 前缀只进 BM25（区分「前缀的信息
   #   价值」与「前缀对 dense 的扰动」）。前缀生成走 LLM 响应缓存，同 chunk 重入库
   #   零成本；失败降级为「无前缀」并计数，不阻塞入库。
-  enabled: false
+  enabled: true
   # 留空三项 = 继承合成侧 llm 的端点与模型（照 judge 先例）
   model: ""
   base_url: ""

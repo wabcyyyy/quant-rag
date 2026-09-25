@@ -1800,6 +1800,51 @@ A4 七臂扫线 / RGB 复核 / `doc-rag repro` 一键入口）→ Phase D 收口
 
 
 
+### 冻结：U3① 转正 + 七项清单（2026-09-25，读数轮前置）
+
+**U3① 拍板**（用户按 ADR-0004 检索侧读数委托执行）：`contextual.enabled` 默认
+false → **true**。时序理由：在冻结与 Phase C **之前**转正，公开底座的正式基线自建立
+之日起即带前缀形态，**无已发布数字作废**；钉住测试随拍板反转
+（`test_contextual_enabled_by_default`）。回滚条件：答案侧三臂判读若在 Phase C 显示
+倒退，按 L2 重跑（≈¥30）——这是拍板时已接受的风险。
+
+**重建验证**（转正后把正式库重建为 ②臂形态：`ingest --parsed-dir data/sample_parsed/s3
+--kb doc_rag_sample --recreate --index-only`，前缀生成走响应缓存 ¥0，实付仅嵌入）：
+
+| 读数（`--retrieval-only --rerank`，无 rewrite） | 重建后 doc_rag_sample | ADR-0004 臂② | 差 |
+|---|---|---|---|
+| Hit@5（两遍） | 0.9394 / 0.9394（极差 0） | 0.9394（两遍同） | 0 |
+| Hit@8 | 0.9848 | 0.9848 | 0 |
+| Recall@5 | 0.9402 | 0.9402 | 0 |
+| Recall@清单（上限 0.9942） | 0.9779 | 0.9779 | 0 |
+| MRR / nDCG@8 | 0.7960 / 0.8451 | 0.7960 / 0.8450 | 0 / +0.0001 |
+
+六项逐字一致、极差 0 → 重建库与 ADR ②臂等价（结果文件 `results_20260925_155358.json`）。
+
+> 首轮重建曾因配置误伤（一次全局替换把 `metadata_extraction.enabled` 一并改成 true，
+> 元数据抽取真跑了）读数偏离：Hit@5 主口径 0.9242、极差 0.0152——**同一份语料与
+> 分块，只是 payload 元数据不同**。回退配置重做后逐字复现 ②臂。记在这里的理由：
+> 这是「配置即口径」的又一个实例，也说明重建后必须复跑验证读数、不能假定幂等。
+
+**冻结七项**（凭证 = `.cache/freeze_<freeze_id>.json`，gitignored；**本提交即被冻结的
+代码状态**，`git status --porcelain` 为空）：
+
+| # | 项 | 值 |
+|---|---|---|
+| 1 | 代码 | 本提交（commit 见 freeze 记录的 `commit` 字段） |
+| 2 | 配置 | `configs/default.yaml` sha256 `f61faa2eecd39c96` |
+| 3 | 库 | `doc_rag_sample` · 320 篇 / 348 块 · `BAAI/bge-m3` · dim 1024 · `index_fp 6a40de326670aeb6` |
+| 4 | 黄金集 | `gold_core.json` sha `a0b5ad905a741176` · `gold_full.json` sha `afb4873025e85cd4` |
+| 5 | prompt | fingerprint `0aaa9d262c09` |
+| 6 | 模型 | 合成/判分 `api.deepseek.com/deepseek-flash` · 嵌入 `BAAI/bge-m3` · 重排 `BAAI/bge-reranker-v2-m3` |
+| 7 | 思考档 | `{cross_doc: none, time_filter: none}`（其余走默认开） |
+
+`synth_fp` 的组成含 commit hash（自指），故 PLAN 只公布上表内容、指纹值以 freeze 文件
+为准。**冻结纪律**：freeze 之后任何 git 提交都会使 `synth_fp` 失配（eval 在答案侧报警）；
+Phase C 期间不改代码；跨 `freeze_id` 禁并排报数（metrics.md 判读协议）。
+
+---
+
 ## 6. 交付物与复现命令
 
 ### 代码仓库结构

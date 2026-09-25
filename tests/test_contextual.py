@@ -3,7 +3,7 @@
 - 生成失败必须降级「无前缀」并计数（metadata.extract_metadata 先例）；
 - 三臂的被索引文本组合：off=无前缀；both=dense+BM25 都带；bm25=只 BM25 带
   （dense 与无前缀臂同输入）；
-- `contextual.enabled` 默认 false（转正与否是 U3 用户拍板项，不许代码替默认）；
+- `contextual.enabled` 默认 true（2026-09-25 U3① 转正拍板；钉住防悄悄改动 = L2 作废）；
 - model/base_url/api_key 留空 = 继承合成侧 llm。
 """
 
@@ -166,9 +166,9 @@ def test_three_arms_compose_index_text(monkeypatch, tmp_path):
     assert bm25_text != off_bm25, "bm25 臂的 BM25 文本必须带上前缀"
 
 
-def test_contextual_disabled_by_default():
-    """U3 待拍板项：默认必须关（配置写谎 = 悄悄作废全部检索基线）。"""
+def test_contextual_enabled_by_default():
+    """U3① 已拍板转正（2026-09-25）：默认必须开（配置写谎 = 悄悄作废全部检索基线）。"""
     import yaml
 
     raw = yaml.safe_load((ROOT / "configs" / "default.yaml").read_text("utf-8"))
-    assert raw["contextual"]["enabled"] is False
+    assert raw["contextual"]["enabled"] is True
