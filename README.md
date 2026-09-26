@@ -84,7 +84,7 @@ docker compose up -d   # Qdrant :6333（镜像在 compose 里钉 v1.19.1，不�
 uv run doc-rag check   # 冒烟：LLM 连通 / Embedding 维度与 dense_dim 一致 / sparse 探测 / Qdrant 版本与钉版一致
 uv run doc-rag profile # Phase 0：语料画像（data/raw 放入语料后执行）
 uv run doc-rag ingest  # 双路接入 → data/parsed 统一中间 JSON
-uv run pytest          # 测试（456 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
+uv run pytest          # 测试（461 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
 uv run doc-rag check-rewrite  # 查询改写泛化门禁（真实调用模型，会花约 ¥0.01，并打印生效模型与逐次延迟）
 ```
 

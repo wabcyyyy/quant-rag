@@ -588,6 +588,133 @@ def freeze_cmd(
     )
 
 
+@app.command("repro")
+def repro_cmd(
+    kb: Annotated[
+        str,
+        typer.Option(help="复现用 collection（与生产库分开，避免污染既有基线）"),
+    ] = "doc_rag_repro",
+    gold: Annotated[Path | None, typer.Option(help="黄金集（默认公开核心集）")] = None,
+    parsed_dir: Annotated[
+        Path | None, typer.Option(help="中间 JSON 目录（默认公开示例语料）")
+    ] = None,
+    answers: Annotated[
+        bool,
+        typer.Option(
+            "--answers/--no-answers",
+            help="也跑答案基线（会调 LLM 合成，真实计费；默认只跑检索侧 ¥0）",
+        ),
+    ] = False,
+    recreate: Annotated[
+        bool, typer.Option(help="重建 collection（库里已有同名的旧状态时用）")
+    ] = False,
+    out: Annotated[Path | None, typer.Option(help="结果落盘路径")] = None,
+) -> None:
+    """C7：一键复现头条数字——clone 者「两条命令跑出头条数字」的入口。
+
+    ```bash
+    docker compose up -d          # ① 起 Qdrant
+    uv run doc-rag repro          # ② 入库公开示例语料 → 跑核心集 → 打印读数表
+    ```
+
+    **为什么单开一条命令**：头条数字此前只存在于文档里，复现要人肉拼四条命令、
+    还容易把私有语料目录（`data/parsed`）当输入串进库。这条命令把默认值全部指向
+    **公开**语料（`data/sample_parsed/s3`，320 篇虚构会议纪要）与公开黄金集
+    （`data/eval/gold_core.json`），并把 collection 默认隔离到 `doc_rag_repro`。
+
+    检索侧（默认）不走 LLM：只花嵌入与重排的 API 调用（本语料实测 <¥0.1）。
+    `--answers` 才会调合成模型（74 条 ≈¥0.5，延迟与质量读数一并产出）。
+    """
+    cfg = load_config()
+    gold_file = gold or ROOT / "data" / "eval" / "gold_core.json"
+    parsed = parsed_dir or ROOT / "data" / "sample_parsed" / "s3"
+    if not gold_file.exists():
+        typer.echo(f"黄金集不存在：{gold_file}")
+        raise typer.Exit(1)
+    if not parsed.exists():
+        typer.echo(
+            f"示例语料中间件不存在：{parsed}——先 `uv run doc-rag ingest "
+            f"--raw-dir data/sample_raw --parsed-dir {parsed}` 解析一次"
+        )
+        raise typer.Exit(1)
+
+    from qdrant_client import QdrantClient
+
+    try:
+        QdrantClient(url=cfg["qdrant"]["url"], timeout=5).get_collections()
+    except Exception as exc:  # 前置不满足时给出可执行的下一步
+        typer.echo(f"Qdrant 不可达（{exc}）——先 `docker compose up -d`")
+        raise typer.Exit(1) from exc
+
+    from doc_rag.ingest.indexer import index_parsed
+
+    typer.echo(f"① 入库公开示例语料 → collection「{kb}」")
+    stats = index_parsed(
+        parsed,
+        cfg,
+        collection=kb,
+        recreate=recreate,
+        use_llm_meta=None,  # 读配置（默认关）：复现路径不花元数据抽取的钱
+        chunk_strategy="structural",
+        ctx_mode=None,  # 读配置：与冻结状态同一条默认路径
+    )
+    typer.echo(
+        f"  {stats['docs']} 篇 / {stats['chunks']} 块"
+        f"（解析产物 {stats['parsed']} 篇 · 空文档 {stats['empty']} 篇不入库）"
+    )
+
+    from doc_rag.eval.runner import evaluate
+
+    typer.echo(
+        "\n② 检索侧基线（与 PLAN §5.7 阶段读数同口径：--retrieval-only --rerank）"
+    )
+    retr = evaluate(
+        gold_file,
+        cfg=cfg,
+        collection=kb,
+        top_n=8,
+        with_answers=False,
+        use_rewrite=False,  # 检索侧零 LLM：改写会按题调用模型，显式关掉
+        use_rerank=True,
+        progress_file=out or ROOT / "data" / "eval" / "repro_retrieval.json",
+    )
+    s = retr["summary"]
+    typer.echo(
+        f"  Hit@5 {s['hit_at_5']} · Hit@8 {s['hit_at_8']} · "
+        f"Recall@清单 {s['recall_at_list_macro']}（上限 {s['recall_ceiling_macro']}）"
+    )
+    typer.echo(f"  MRR {s['mrr']} · nDCG@8 {s['ndcg_at_8']} · n={s['n_items']} 条")
+
+    if not answers:
+        typer.echo(
+            "\n（答案侧基线要调 LLM：加 --answers 重跑。"
+            "复现读数表见 docs/guides/repro.md）"
+        )
+        return
+
+    typer.echo("\n③ 答案侧基线（--rewrite --rerank，会真实计费）")
+    ans = evaluate(
+        gold_file,
+        cfg=cfg,
+        collection=kb,
+        top_n=8,
+        with_answers=True,
+        use_rewrite=True,
+        use_rerank=True,
+        progress_file=ROOT / "data" / "eval" / "repro_answers.json",
+    )
+    a = ans["summary"]
+    typer.echo(f"  严格关键词准确率 {a['strict_keyword_accuracy']}")
+    typer.echo(
+        f"  要点召回 {a['keypoint_recall_macro']}（n={a['keypoint_n_items']}）"
+        f" · 拒答正确率 {a['refusal_acc']} · 引用有效率 {a['citation_valid_rate']}"
+    )
+    typer.echo(
+        "\n门槛（三条噪声地板，2026-09-26 实测）：检索 0~2 条 · "
+        "faithfulness 0.4pt · keypoint 7.1pt——小于地板的差异不下结论。"
+    )
+
+
 @app.command("cache-stats")
 def cache_stats_cmd() -> None:
     """本地响应缓存的画像：条数、体积、按模型的分布、最老/最新条目。
