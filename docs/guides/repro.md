@@ -11,6 +11,8 @@
 | Qdrant | `docker compose up -d`（镜像钉 `v1.19.1`） |
 | 密钥 | `.env` 里填 DeepSeek（合成/改写/judge）+ SiliconFlow（嵌入/重排）——见 `.env.example` |
 | 联网 | 需要：嵌入与重排走 API。跑 `--answers` 才会用到合成模型 |
+| OCR（可选但影响读数） | `uv sync --extra ocr`——不装则 **4 篇无文本层的扫描件不入库**（320→316 篇 / 348→344 块），
+实测 Hit@5 从 0.9394 掉到 0.9242（≈1.5pt）。要完全对齐头条数字就装上 |
 
 缺密钥时检索侧仍可跑通一半（入库要嵌入），**不要**把 key 写进任何被 git 跟踪的文件。
 
@@ -49,9 +51,13 @@ uv run doc-rag repro         # ② 入库公开语料 → 检索侧基线 → �
 | 要点召回（聚合题） | 0.6694（n=31） |
 | 拒答正确率 / 引用有效率 | 1.0 / 1.0 |
 
-> `repro` 走的是**从头入库的独立 collection**，与冻结库的 `index_fp` 不同名
-> （collection 名进指纹），所以读数会与上表有**亚 pt 级**差异——那是重嵌入的
-> 向量噪声，不是复现失败。差异超过**噪声地板**（见下）才值得查。
+> **预期读数是一个区间，不是一个字面值**：`repro` 走的是**从头入库的独立 collection**
+> （collection 名进指纹，`index_fp` 必然与冻结库不同），两次独立入库的向量带 API 浮点
+> 噪声（**解析产物逐字相同**，差异全在嵌入侧）。实测：主仓 0.9394 vs 干净 clone 0.9242，
+> 逐条对账**只差 1 条**（c069 的 gold 篇 rank 2 → 掉出 top-8），落在检索地板
+> （0~2 条 / ≤1.1pt）内。历史上同语料全量重嵌入测到过 14/72 条检回集合不同——
+> 所以：**差 1~2 条属正常，差更多才值得查**。这也是「跨 `freeze_id` 禁止并排报数」
+> 这条纪律的实体（同结构、不同向量，指纹当前看不见）。
 
 ## 4. 判读门槛（三条噪声地板，2026-09-26 公开底座重测）
 
@@ -70,7 +76,9 @@ uv run doc-rag repro         # ② 入库公开语料 → 检索侧基线 → �
 |---|---|
 | `Qdrant 不可达` | 没起容器。`docker compose up -d` |
 | `示例语料中间件不存在` | 缺 `data/sample_parsed/s3`：`uv run doc-rag ingest --raw-dir data/sample_raw --parsed-dir data/sample_parsed/s3`（会解析 320 篇，¥0） |
-| 入库数字不是 320 篇 | 用同一 collection 跑过别的语料 → 加 `--recreate` |
+| 入库数字不是 320 篇 | 两种原因：① 用同一 collection 跑过别的语料 → 加 `--recreate`；
+② **没装 OCR extra** → 316 篇属预期，`repro` 会当场告警并给出对齐命令 |
+| 首次运行比之后慢 | 干净 clone 没有解析产物（gitignored），`repro` 会自动补一次本地解析（零 API 成本）；之后复用那批 JSON |
 | 读数比上表低 1~2 条 | 先在**同一状态**上重跑一遍（`--repeat 2`）拿极差；差在地板内不算差异 |
 | 答案侧延迟远大于预期 | 缓存命中会伪装低延迟；测真实延迟加 `--fresh-answers`（`repro` 的答案侧默认吃缓存） |
 | `synth_fp / index_fp 不匹配`告警 | 你改过仓库或换过 collection——`doc-rag freeze --kb doc_rag_repro` 会落新的冻结记录；**跨 `freeze_id` 禁止并排报数** |

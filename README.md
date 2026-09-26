@@ -87,7 +87,7 @@ docker compose up -d   # Qdrant :6333（镜像在 compose 里钉 v1.19.1，不�
 uv run doc-rag check   # 冒烟：LLM 连通 / Embedding 维度与 dense_dim 一致 / sparse 探测 / Qdrant 版本与钉版一致
 uv run doc-rag profile # Phase 0：语料画像（data/raw 放入语料后执行）
 uv run doc-rag ingest  # 双路接入 → data/parsed 统一中间 JSON
-uv run pytest          # 测试（461 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
+uv run pytest          # 测试（463 项 = tests/ 下 def test_ 数，全离线 mock，零 API 成本；CI 跑 ruff check + ruff format --check + mypy + pytest；护栏测试会把这里与实测对账）
 uv run doc-rag check-rewrite  # 查询改写泛化门禁（真实调用模型，会花约 ¥0.01，并打印生效模型与逐次延迟）
 ```
 
@@ -103,7 +103,8 @@ uv run doc-rag repro      # ② 入库公开语料 → 检索侧基线 → 打�
 ```
 
 `repro` 默认把 320 篇公开合成语料灌进与生产隔离的 `doc_rag_repro`，跑公开黄金集核心集
-（74 条）；加 `--answers` 会再跑答案侧（会真实计费）。**下面每个数字都能追到一条命令**
+（74 条）；加 `--answers` 会再跑答案侧（会真实计费）。**前提**：依赖按 `uv sync --extra ocr`
+装（不装 OCR 则 4 篇无文本层的扫描件不入库，Hit@5 实测低约 1.5pt——`repro` 会当场告警）。**下面每个数字都能追到一条命令**
 （完整命令与判读门槛见 [docs/guides/repro.md](docs/guides/repro.md)、
 [docs/guides/metrics.md](docs/guides/metrics.md)；读数表全文见
 [PLAN §5.7](docs/design/PLAN.md) 的「C 电池读数」）。
@@ -142,9 +143,11 @@ faithfulness **0.4pt**、keypoint **7.1pt**。**差异小于地板的不要下�
 尤其 keypoint：聚合题要点判据的 run-to-run 抖动在公开底座上是 7.1pt
 （公司语料时代的 3.10pt 不迁移）。
 
-> 读数跑在冻结 `1d53ea329bf4`（320 篇 / 348 块，`doc-rag eval` 的 `meta` 双指纹自证）；
-> 交付这一节的 commit 之后产生了新 `freeze_id`——**跨 `freeze_id` 禁止并排报数**，
-> 重跑 `repro` 的读数与上表的差异只要落在地板内就不是回归。
+> 读数跑在冻结 `1d53ea329bf4`（320 篇 / 348 块，`doc-rag eval` 的 `meta` 双指纹自证）。
+> **重跑 `repro` 得到的是同分布的另一份读数**：它从头入库一个独立 collection，
+> 向量带 API 浮点噪声（解析产物逐字相同）——干净目录实测 Hit@5 0.9394 → 0.9242、
+> 逐条只差 1 条，落在检索地板（0~2 条）内。**跨 `freeze_id` 禁止并排报数**；
+> 差 1~2 条不是回归，差更多才值得查。
 
 ## 状态（对照 [PLAN §7](docs/design/PLAN.md) 路线图）
 

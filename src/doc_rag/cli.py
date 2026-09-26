@@ -608,6 +608,12 @@ def repro_cmd(
     recreate: Annotated[
         bool, typer.Option(help="重建 collection（库里已有同名的旧状态时用）")
     ] = False,
+    reparse: Annotated[
+        bool,
+        typer.Option(
+            help="强制重解析（改了语料/补装了 OCR 依赖后必须用——已有 JSON 会被复用）"
+        ),
+    ] = False,
     out: Annotated[Path | None, typer.Option(help="结果落盘路径")] = None,
 ) -> None:
     """C7：一键复现头条数字——clone 者「两条命令跑出头条数字」的入口。
@@ -631,12 +637,31 @@ def repro_cmd(
     if not gold_file.exists():
         typer.echo(f"黄金集不存在：{gold_file}")
         raise typer.Exit(1)
-    if not parsed.exists():
+
+    raw = ROOT / "data" / "sample_raw"
+    if reparse or not parsed.exists() or not any(parsed.glob("*.json")):
+        # 干净 clone 里没有解析产物（它是 gitignored 的构建件）——自动补一次解析。
+        # 「两条命令跑通」这句话必须对干净 clone 成立，而解析是纯本地步骤（零 API 成本）；
+        # 让用户去读第三条命令，等于把「一键」变成「三键」。
+        # `--reparse` 是同一段逻辑的显式入口：解析产物会被无条件复用（pipeline 只在
+        # 跑的时候覆盖写），所以「补装了 OCR 依赖」或「换了语料」时必须强制重解析，
+        # 否则读数会停在旧解析上——干净 clone 实测踩过：装上 OCR 但复用旧 JSON，
+        # 4 篇扫描件仍是空的（316 篇 vs 320 篇）。
+        if not raw.exists():
+            typer.echo(f"示例语料不存在：{raw}")
+            raise typer.Exit(1)
+        from doc_rag.ingest import pipeline as ingest_pipeline
+
         typer.echo(
-            f"示例语料中间件不存在：{parsed}——先 `uv run doc-rag ingest "
-            f"--raw-dir data/sample_raw --parsed-dir {parsed}` 解析一次"
+            ("①a 强制重解析" if reparse else "①a 首次运行：解析公开语料")
+            + f"（本地，零 API 成本）→ {parsed}"
         )
-        raise typer.Exit(1)
+        pstats = ingest_pipeline.run(raw, parsed)
+        typer.echo(
+            f"  解析 {pstats['parsed']}/{pstats['total']} 篇"
+            f"（去重跳过 {pstats['skipped_duplicate']} · 失败 {len(pstats['failed'])}）"
+            f"——之后重跑会直接复用这批 JSON"
+        )
 
     from qdrant_client import QdrantClient
 
@@ -646,7 +671,19 @@ def repro_cmd(
         typer.echo(f"Qdrant 不可达（{exc}）——先 `docker compose up -d`")
         raise typer.Exit(1) from exc
 
+    # OCR 是可选的额外依赖，但它直接决定 4 篇近空扫描件能不能入库——而 gold 里
+    # 有扫描件来源的题（c006 等）。干净 clone 只 `uv sync` 时实测 Hit@5 会低约 1.5pt
+    # （320 篇→316 篇、348 块→344 块）。这条差异必须显式说出来，不能让读的人
+    # 以为「复现失败」或「复现成功」——两个都不对。
+    from doc_rag.ingest import ocr as ocr_mod
     from doc_rag.ingest.indexer import index_parsed
+
+    if not ocr_mod.available():
+        typer.echo(
+            "  ⚠ 未安装 OCR 可选依赖：4 篇无文本层的扫描件不会入库，检索读数会低于\n"
+            "    README 头条数字约 1.5pt（实测 Hit@5 0.9242 vs 0.9394）。\n"
+            "    要完全对齐：`uv sync --extra ocr` 后加 `--reparse --recreate` 重跑本命令。"
+        )
 
     typer.echo(f"① 入库公开示例语料 → collection「{kb}」")
     stats = index_parsed(

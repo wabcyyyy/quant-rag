@@ -82,6 +82,45 @@ def test_repro_answers_opt_in_runs_second_pass(_stub):
     assert _stub["eval"][1]["use_rewrite"] is True
 
 
+def test_repro_parses_automatically_on_clean_clone(_stub, monkeypatch, tmp_path):
+    """干净 clone 里没有解析产物（gitignored 构建件）→ 必须自动补一次解析。
+
+    「两条命令跑通」这句话只对「解析产物已在盘上」的工作区成立；干净 clone 要成立，
+    就必须让 repro 自己解析（纯本地、零 API 成本）。这是新目录实测发现的真缺口。
+    """
+    from doc_rag.ingest import pipeline as ingest_pipeline
+
+    calls: list = []
+    monkeypatch.setattr(
+        ingest_pipeline,
+        "run",
+        lambda raw, parsed, **kw: (
+            calls.append((Path(raw), Path(parsed))),
+            {"total": 320, "parsed": 320, "skipped_duplicate": 0, "failed": []},
+        )[1],
+    )
+    missing = tmp_path / "no-such-parsed"
+    res = CliRunner().invoke(cli.app, ["repro", "--parsed-dir", str(missing)])
+    assert res.exit_code == 0, res.output
+    assert len(calls) == 1
+    assert calls[0][0].as_posix().endswith("data/sample_raw")  # 从入库语料解析
+    assert calls[0][1] == missing
+
+
+def test_repro_skips_parse_when_parsed_dir_populated(_stub, monkeypatch, tmp_path):
+    """解析产物已在盘上时必须跳过解析——否则每次重跑都白解析一遍 320 篇。"""
+    from doc_rag.ingest import pipeline as ingest_pipeline
+
+    seen: list = []
+    monkeypatch.setattr(ingest_pipeline, "run", lambda *a, **kw: seen.append(a) or {})
+    ready = tmp_path / "sample_parsed"
+    ready.mkdir()
+    (ready / "doc.json").write_text("{}", encoding="utf-8")
+    res = CliRunner().invoke(cli.app, ["repro", "--parsed-dir", str(ready)])
+    assert res.exit_code == 0, res.output
+    assert seen == []
+
+
 def test_repro_refuses_when_qdrant_unreachable(monkeypatch):
     """前置不满足要给可执行的下一步，不许半路崩在入库里。"""
     import qdrant_client
